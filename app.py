@@ -2185,16 +2185,29 @@ with tab2:
         st.markdown("- Integrates FRED historical data + curated news knowledge")
         st.markdown("- Outputs direction-only signals (no Entry/SL/TP)")
         st.markdown("- Sends verified signals to Telegram")
-        
-        if st.button("🚀 Analyse News with AI", type="primary"):
+
+        selected_event = None
+        for event_index, event in enumerate(st.session_state.fetched_news):
+            event_id = event.get('event_id') or f"{event.get('event')}|{event.get('currency')}|{event.get('time')}"
+            already_analyzed = bool(st.session_state.news_results.get(event_id) or st.session_state.news_signal_sent.get(event_id))
+            event_col, action_col = st.columns([4, 1])
+            with event_col:
+                st.markdown(f"**📌 {event['event']}**  \n`{event['currency']}` | `{event['time']}` | `{event['impact']}`")
+            with action_col:
+                button_label = "✅ Analysed" if already_analyzed else "🚀 Analyse News with AI"
+                if st.button(button_label, key=f"analyse_news_{event_index}", type="primary", disabled=already_analyzed, use_container_width=True):
+                    selected_event = event
+            st.markdown("---")
+
+        if selected_event:
             if not get_secret("GROQ_API_KEY"):
                 st.error("⚠️ Please set your GROQ_API_KEY in Streamlit Secrets.")
             else:
-                with st.spinner("Fetching market data and running institutional news analysis..."):
+                with st.spinner(f"Fetching market data and analysing {selected_event['event']}..."):
                     all_data = fetch_all_data()
                     st.session_state.cached_market_data = all_data
                     
-                    results = run_news_analysis_cycle(st.session_state.fetched_news, all_data, SYMBOLS)
+                    results = run_news_analysis_cycle([selected_event], all_data, SYMBOLS)
                     
                     for eid, event_results in results.items():
                         event = st.session_state.news_results[eid]['event']
