@@ -1,4 +1,4 @@
-import os, json, requests, time, re, random, traceback, uuid, html, base64, io
+import os, json, requests, time, re, random, traceback, uuid, html
 from datetime import datetime, timezone, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Dict, List, Optional
@@ -7,19 +7,18 @@ import streamlit as st
 import streamlit.components.v1 as components
 import pandas as pd
 import numpy as np
-import matplotlib.pyplot as plt
-from matplotlib.patches import Rectangle
 try:
     import yfinance as yf
 except Exception:
     yf = None
 
 # ── Page Config & UI Styling ───────────────────────────────────────────────
-st.set_page_config(page_title="Der-AI | Institutional Market Analysis", page_icon="📊", layout="wide", initial_sidebar_state="expanded")
+st.set_page_config(page_title="Der-AI | News Analysis", page_icon="📰", layout="wide", initial_sidebar_state="expanded")
 st.markdown("""
 <style>
-    .stButton>button { background: linear-gradient(90deg, #1e3a8a 0%, #3b82f6 100%); color: white; border: none; padding: 10px 24px; border-radius: 8px; font-weight: bold; font-size: 16px; width: 100%; }
-    .stButton>button:hover { background: linear-gradient(90deg, #1e40af 0%, #2563eb 100%); }
+    .stButton>button { background: linear-gradient(90deg, #059669 0%, #10b981 100%); color: white; border: none; padding: 10px 24px; border-radius: 8px; font-weight: bold; font-size: 16px; width: 100%; }
+    .stButton>button:hover { background: linear-gradient(90deg, #047857 0%, #059669 100%); }
+    .news-card { background: #f0fdf4; padding: 20px; border-radius: 12px; border-left: 6px solid #10b981; box-shadow: 0 4px 6px rgba(0,0,0,0.05); margin-bottom: 15px; }
     .signal-card { background: #f8fafc; padding: 20px; border-radius: 12px; border-left: 6px solid #3b82f6; box-shadow: 0 4px 6px rgba(0,0,0,0.05); margin-bottom: 15px; }
     .buy-signal { border-left-color: #10b981; }
     .sell-signal { border-left-color: #ef4444; }
@@ -43,28 +42,40 @@ TELEGRAM_CHAT_ID = get_secret("TELEGRAM_CHAT_ID", "")
 SYMBOLS = ['XAUUSD', 'EURUSD', 'BTCUSD', 'US30']
 YFINANCE_MAP = {'XAUUSD': 'GC=F', 'EURUSD': 'EURUSD=X', 'BTCUSD': 'BTC-USD', 'US30': '^DJI', 'DXY': 'DX-Y.NYB'}
 MINIMUM_CONFLUENCE_SCORE = 72
-GEMINI_MIN_REQUEST_INTERVAL = 3
-GEMINI_TOKEN_LIMIT_PER_MINUTE = 1000000  # Increased to prevent false limits
-GEMINI_ESTIMATED_RESPONSE_TOKENS = 2000
-GEMINI_MODELS = ['gemini-2.5-pro', 'gemini-2.5-flash', 'gemini-1.5-pro']
+
+GROQ_API_URL = 'https://api.groq.com/openai/v1/chat/completions'
+GROQ_MIN_REQUEST_INTERVAL = 3
+GROQ_TOKEN_LIMIT_PER_MINUTE = 1000000
+GROQ_MAX_OUTPUT_TOKENS = 4000
+GROQ_ESTIMATED_RESPONSE_TOKENS = GROQ_MAX_OUTPUT_TOKENS
+GROQ_MODELS = [
+    'openai/gpt-oss-120b',  # Primary: Groq's recommended high-reasoning replacement
+    'openai/gpt-oss-20b',   # Secondary: Lighter/faster GPT OSS fallback
+    'qwen/qwen3-32b'        # Tertiary: Qwen fallback (matches your MARKETANALYSIS.PY slugs)
+]
 PYTHON_FALLBACK_MODEL = 'Python fallback (rule-based MTF confluence)'
+NEWS_PRE_WINDOW_HOURS = 2
 
 if 'signal_history' not in st.session_state: st.session_state.signal_history = []
 if 'notifications' not in st.session_state: st.session_state.notifications = []
 if 'cached_market_data' not in st.session_state: st.session_state.cached_market_data = {}
 if 'last_market_fetch_time' not in st.session_state: st.session_state.last_market_fetch_time = None
 if 'active_signals' not in st.session_state: st.session_state.active_signals = {}
+if 'fetched_news' not in st.session_state: st.session_state.fetched_news = []
+if 'news_results' not in st.session_state: st.session_state.news_results = {}
+if 'news_event_statuses' not in st.session_state: st.session_state.news_event_statuses = {}
+if 'news_signal_sent' not in st.session_state: st.session_state.news_signal_sent = {}
 if 'directional_bias' not in st.session_state: st.session_state.directional_bias = {}
 if 'signal_ledger' not in st.session_state: st.session_state.signal_ledger = []
 if 'learning_stats' not in st.session_state: st.session_state.learning_stats = {}
 if 'market_state' not in st.session_state: st.session_state.market_state = 'coiling'
 if 'state_history' not in st.session_state: st.session_state.state_history = []
-if 'gpt_tokens_used' not in st.session_state: st.session_state.gpt_tokens_used = 0
-if 'gpt_token_window_start' not in st.session_state: st.session_state.gpt_token_window_start = datetime.now()
-if 'last_gpt_request_time' not in st.session_state: st.session_state.last_gpt_request_time = None
-if 'gpt_rate_limit_until' not in st.session_state: st.session_state.gpt_rate_limit_until = None
-if 'gpt_rate_limit_reason' not in st.session_state: st.session_state.gpt_rate_limit_reason = ''
-if 'cached_analysis' not in st.session_state: st.session_state.cached_analysis = {}
+
+if 'groq_tokens_used' not in st.session_state: st.session_state.groq_tokens_used = 0
+if 'groq_token_window_start' not in st.session_state: st.session_state.groq_token_window_start = datetime.now()
+if 'last_groq_request_time' not in st.session_state: st.session_state.last_groq_request_time = None
+if 'groq_rate_limit_until' not in st.session_state: st.session_state.groq_rate_limit_until = None
+if 'groq_rate_limit_reason' not in st.session_state: st.session_state.groq_rate_limit_reason = ''
 
 def add_notification(note_type, message, symbol=None, signal=None, score=None):
     if 'notifications' not in st.session_state:
@@ -121,27 +132,233 @@ def send_telegram_message(message):
         print(f"Telegram error: {e}")
         return False
 
-def build_telegram_signal_message(symbol, result):
-    tp_values = result.get('take_profit', [])
-    tp_value = tp_values[0] if tp_values else 'N/A'
-    score = result.get('confluence_score', 0)
-    signal = normalize_ai_signal(result.get('signal'))
-    signal = _escape_telegram_html(signal)
-    reasoning = _escape_telegram_html(result.get('reasoning'))
-    order_type = _escape_telegram_html(result.get('order_type', 'MARKET'))
-    model = _escape_telegram_html(result.get('model_used', 'Unknown'))
-    tokens = result.get('total_tokens', 'N/A')
-    return (
-        f"🌍 <b>DER-AI MARKET SIGNAL</b>\n"
-        f"📊 <b>{_escape_telegram_html(symbol)}</b> - {signal}\n"
-        f"🤖 Model: {model} | 📈 Score: {score}/100 | 🔋 Tokens: {tokens}\n"
-        f"🧾 Order: {order_type}\n"
-        f"💰 Entry: {_escape_telegram_html(result.get('entry'))} | 🛑 SL: {_escape_telegram_html(result.get('stop_loss'))} | 🎯 TP: {_escape_telegram_html(tp_value)}\n"
-        f"📈 DXY: {_escape_telegram_html(result.get('dxy_correlation'))}\n"
-        f"🧠 {reasoning}"
-    )
+def build_news_event_telegram(event, results, now):
+    et = event.get('event_time_utc')
+    lead = format_lead_time(et - now) if et else 'N/A'
+    event_time_str = event.get('time', 'N/A')
+    lines = [
+        "📰 <b>DER-AI NEWS IMPACT SIGNAL</b>",
+        f"📌 Event: {_escape_telegram_html(event.get('event'))}",
+        f"🕒 Event time: {_escape_telegram_html(event_time_str)}",
+        f"⏳ Sent {_escape_telegram_html(lead)} before the release (once per event)",
+        "",
+    ]
+    for symbol, a in results.items():
+        sig = a.get('signal', 'SKIPPED')
+        symbol_escaped = _escape_telegram_html(symbol)
+        if sig in ('BUY', 'SELL'):
+            sig_emoji = "🟢" if sig == 'BUY' else "🔴"
+            model_used = _escape_telegram_html(a.get('model_used', PYTHON_FALLBACK_MODEL))
+            lines.append(f"{sig_emoji} <b>{symbol_escaped}</b>: {_escape_telegram_html(sig)} | Model: {model_used}")
+            hist_pattern = a.get('historical_pattern', '')
+            reason = (a.get('reasoning') or '').strip()
+            reason_escaped = _escape_telegram_html(reason)
+            if hist_pattern and hist_pattern not in reason:
+                lines.append(f"📚 Historical: {_escape_telegram_html(hist_pattern)}")
+            if reason_escaped:
+                lines.append(f"🧠 {reason_escaped}")
+            lines.append("")
+        elif sig == 'WAIT':
+            model_used = _escape_telegram_html(a.get('model_used', PYTHON_FALLBACK_MODEL))
+            lines.append(f"⚪ <b>{symbol_escaped}</b>: WAIT | Model: {model_used}")
+            why = (a.get('rejection_reason') or a.get('reasoning') or 'No actionable edge.').strip()
+            if why:
+                lines.append(f"🧠 {_escape_telegram_html(why)}")
+            lines.append("")
+        else:
+            lines.append(f"⚪ <b>{symbol_escaped}</b>: skipped ({_escape_telegram_html(a.get('reason', 'rate limit'))})")
+            lines.append("")
+    return "\n".join(lines)
 
-# ── Data Fetching & SMC Engines (Complete Original Logic) ──────────────────
+def format_lead_time(delta):
+    total = int(delta.total_seconds() // 60)
+    return f"{total // 60}h {total % 60}m"
+
+# ── News Parsing Helpers ─────────────────────────────────────────────────
+def _coerce_impact(impact: Any) -> str:
+    if impact is None:
+        return "UNKNOWN"
+    if isinstance(impact, (int, float)):
+        return "HIGH" if int(impact) >= 3 else "MEDIUM" if int(impact) >= 2 else "LOW"
+    text = str(impact).strip().lower()
+    if text in {"3", "high", "high impact", "red", "important"}:
+        return "HIGH"
+    if text in {"2", "medium", "orange", "moderate"}:
+        return "MEDIUM"
+    return text.upper() if text else "UNKNOWN"
+
+def normalize_event_time(date_str, time_str, timezone_name, reference_dt=None):
+    if not date_str:
+        return None
+    try:
+        if isinstance(date_str, datetime):
+            event_dt = date_str
+        else:
+            text = str(date_str).strip()
+            if text.endswith("Z"):
+                text = text[:-1] + "+00:00"
+            event_dt = datetime.fromisoformat(text)
+            if event_dt.tzinfo is None:
+                if timezone_name:
+                    try:
+                        event_dt = event_dt.replace(tzinfo=ZoneInfo(str(timezone_name)))
+                    except Exception:
+                        event_dt = event_dt.replace(tzinfo=timezone.utc)
+                else:
+                    event_dt = event_dt.replace(tzinfo=timezone.utc)
+        return event_dt.astimezone(timezone.utc)
+    except Exception:
+        pass
+    if not time_str:
+        return None
+    try:
+        event_date = datetime.strptime(str(date_str), "%Y-%m-%d").date()
+    except ValueError:
+        try:
+            event_date = datetime.strptime(str(date_str), "%Y-%m-%d %H:%M:%S").date()
+        except ValueError:
+            return None
+    raw_time = str(time_str).strip()
+    try:
+        hour, minute = map(int, raw_time.split(":")[:2])
+    except ValueError:
+        return None
+    tzinfo = None
+    if timezone_name:
+        try:
+            tzinfo = ZoneInfo(str(timezone_name))
+        except Exception:
+            tzinfo = None
+    event_dt = datetime(event_date.year, event_date.month, event_date.day, hour, minute, tzinfo=tzinfo)
+    if tzinfo is None:
+        event_dt = event_dt.replace(tzinfo=timezone.utc)
+    if reference_dt is not None and reference_dt.tzinfo is None:
+        reference_dt = reference_dt.replace(tzinfo=timezone.utc)
+    if event_dt.tzinfo is None:
+        event_dt = event_dt.replace(tzinfo=timezone.utc)
+    return event_dt.astimezone(timezone.utc)
+
+def parse_news_payload(payload, reference_dt=None, lookahead_hours=72, only_high=True):
+    if reference_dt is None:
+        reference_dt = datetime.now(timezone.utc)
+    if reference_dt.tzinfo is None:
+        reference_dt = reference_dt.replace(tzinfo=timezone.utc)
+    events = []
+    for item in payload or []:
+        if not isinstance(item, dict):
+            continue
+        impact = _coerce_impact(item.get("impact"))
+        if only_high and impact != "HIGH":
+            continue
+        if not only_high and impact not in {"HIGH", "MEDIUM"}:
+            continue
+        event_dt = normalize_event_time(item.get("date"), item.get("time"), item.get("timezone") or item.get("tz") or item.get("timeZone"), reference_dt=reference_dt)
+        if event_dt is None:
+            continue
+        if event_dt < reference_dt - timedelta(hours=6):
+            continue
+        if event_dt > reference_dt + timedelta(hours=lookahead_hours):
+            continue
+        minutes_until = int((event_dt - reference_dt).total_seconds() // 60)
+        events.append({
+            "event": str(item.get("event") or item.get("title") or "Economic Event").strip(),
+            "currency": str(item.get("country") or item.get("currency") or item.get("pair") or "USD").strip(),
+            "impact": "HIGH" if impact == "HIGH" else "MEDIUM",
+            "time": event_dt.strftime("%Y-%m-%d %H:%M UTC"),
+            "event_time_utc": event_dt,
+            "minutes_until": minutes_until,
+            "within_2h": minutes_until <= 120 and minutes_until >= 0,
+            "timezone": item.get("timezone") or item.get("tz") or item.get("timeZone") or "UTC"
+        })
+    events.sort(key=lambda e: e["event_time_utc"])
+    return events
+
+def build_news_context(events, reference_dt=None):
+    if reference_dt is None:
+        reference_dt = datetime.now(timezone.utc)
+    if reference_dt.tzinfo is None:
+        reference_dt = reference_dt.replace(tzinfo=timezone.utc)
+    upcoming = [e for e in events if e.get("event_time_utc") and e["event_time_utc"] >= reference_dt]
+    within_2h = [e for e in upcoming if e.get("within_2h")]
+    next_event = upcoming[0] if upcoming else None
+    if next_event:
+        minutes_until = int((next_event["event_time_utc"] - reference_dt).total_seconds() // 60)
+        if minutes_until <= 120:
+            bias = "opposite"
+            pre_news_bias = f"High-impact event arriving in {minutes_until} minutes; expect the market to express a short-term reactive move before stabilizing."
+        else:
+            bias = "neutral"
+            pre_news_bias = f"Upcoming high-impact event in {minutes_until} minutes; monitor for volatility expansion and a likely liquidity sweep."
+    else:
+        bias = "neutral"
+        pre_news_bias = "No imminent high-impact event in the next 2 hours."
+    return {
+        "within_2h": bool(within_2h),
+        "bias": bias,
+        "upcoming_count": len(upcoming),
+        "next_event": next_event,
+        "pre_news_bias": pre_news_bias,
+        "summary": "\n".join([f"- {e['time']} | {e['currency']} | {e['event']}" for e in upcoming[:5]])
+    }
+
+def format_news_summary(events, limit=5):
+    if not events:
+        return "No high-impact news in the upcoming window."
+    items = events[:limit]
+    return "\n".join([f"- {e['time']} {e['currency']}: {e['event']}" for e in items])
+
+def format_east_africa_time(dt):
+    try:
+        east_africa = dt.astimezone(ZoneInfo("Africa/Nairobi"))
+        return east_africa.strftime("%Y-%m-%d %H:%M EAT")
+    except Exception:
+        return dt.strftime("%Y-%m-%d %H:%M UTC")
+
+def is_same_day_event(event_dt, reference_dt=None):
+    reference = reference_dt or datetime.now(timezone.utc)
+    if reference.tzinfo is None:
+        reference = reference.replace(tzinfo=timezone.utc)
+    try:
+        east_ref = reference.astimezone(ZoneInfo("Africa/Nairobi"))
+        east_event = event_dt.astimezone(ZoneInfo("Africa/Nairobi"))
+        return east_ref.date() == east_event.date()
+    except Exception:
+        return event_dt.date() == reference.date()
+
+def is_usd_sensitive_news(event):
+    currency = str(event.get('currency') or '').upper()
+    event_name = str(event.get('event') or '').upper()
+    if currency == 'USD':
+        return True
+    usd_keywords = ['FED', 'FOMC', 'CPI', 'PPI', 'NFP', 'PAYROLL', 'UNEMPLOYMENT', 'JOBLESS', 'RETAIL SALES', 'GDP', 'ISM', 'PMI', 'CONSUMER CONFIDENCE', 'TREASURY', 'INFLATION', 'PCE', 'JOLTS', 'CONSTRUCTION', 'HOME SALES', 'TRADE BALANCE', 'DURABLE GOODS', 'MICHIGAN', 'FEDERAL RESERVE', 'DOLLAR', 'USD']
+    return any(keyword in event_name for keyword in usd_keywords)
+
+def filter_relevant_news(events, selected_symbols=None, reference_dt=None):
+    reference = reference_dt or datetime.now(timezone.utc)
+    if reference.tzinfo is None:
+        reference = reference.replace(tzinfo=timezone.utc)
+    filtered = []
+    for event in events:
+        impact = str(event.get('impact') or '').upper()
+        currency = str(event.get('currency') or '').upper()
+        if impact not in ('HIGH', 'MEDIUM'):
+            continue
+        if currency != 'USD':
+            continue
+        event_dt = event.get('event_time_utc')
+        if event_dt is None:
+            continue
+        if event_dt < reference - timedelta(hours=6):
+            continue
+        if event_dt > reference + timedelta(hours=24):
+            continue
+        if not is_same_day_event(event_dt, reference):
+            continue
+        filtered.append(event)
+    filtered.sort(key=lambda e: e['event_time_utc'])
+    return filtered
+
+# ── Data Fetching & SMC Engines ──────────────────────────────────────────
 def _build_dataframe_from_records(records):
     if not records:
         return pd.DataFrame()
@@ -344,16 +561,16 @@ def detect_order_blocks(df):
         if i < 2:
             continue
         candle, prev_candle = df.iloc[i], df.iloc[i-1]
-        if (candle['Close'] > candle['Open'] and
-            (candle['Close'] - candle['Open']) > (candle['High'] - candle['Low']) * 0.6 and
+        if (candle['Close'] > candle['Open'] and 
+            (candle['Close'] - candle['Open']) > (candle['High'] - candle['Low']) * 0.6 and 
             prev_candle['Close'] < prev_candle['Open']):
             order_blocks.append({
                 'type': 'BULLISH_OB',
                 'price': candle['Low'],
                 'strength': 'STRONG' if (candle['Close'] - candle['Open']) > (candle['High'] - candle['Low']) * 0.8 else 'MODERATE'
             })
-        if (candle['Close'] < candle['Open'] and
-            (candle['Open'] - candle['Close']) > (candle['High'] - candle['Low']) * 0.6 and
+        if (candle['Close'] < candle['Open'] and 
+            (candle['Open'] - candle['Close']) > (candle['High'] - candle['Low']) * 0.6 and 
             prev_candle['Close'] > prev_candle['Open']):
             order_blocks.append({
                 'type': 'BEARISH_OB',
@@ -383,16 +600,16 @@ def detect_liquidity_sweeps(df):
     recent = df.tail(10)
     for i in range(1, len(recent)):
         candle, prev = recent.iloc[i], recent.iloc[i-1]
-        if (candle['Low'] < prev['Low'] * 0.999 and
-            candle['Close'] > candle['Open'] and
+        if (candle['Low'] < prev['Low'] * 0.999 and 
+            candle['Close'] > candle['Open'] and 
             (candle['Close'] - candle['Low']) > (candle['High'] - candle['Low']) * 0.6):
             sweeps.append({
                 'type': 'BULLISH_SWEEP',
                 'price': candle['Low'],
                 'strength': 'STRONG' if (candle['Close'] - candle['Low']) > (candle['High'] - candle['Low']) * 0.8 else 'MODERATE'
             })
-        if (candle['High'] > prev['High'] * 1.001 and
-            candle['Close'] < candle['Open'] and
+        if (candle['High'] > prev['High'] * 1.001 and 
+            candle['Close'] < candle['Open'] and 
             (candle['High'] - candle['Close']) > (candle['High'] - candle['Low']) * 0.6):
             sweeps.append({
                 'type': 'BEARISH_SWEEP',
@@ -949,6 +1166,134 @@ def resolve_firm_direction(symbol, picture):
         st.session_state.directional_bias.pop(symbol, None)
     return firm, notes
 
+def calculate_structural_score(df, symbol, dxy_context=None, news_context=None, phase_context=None):
+    if df.empty or len(df) < 10:
+        return {'structural_score': 0, 'score_reason': 'Insufficient data', 'candidate_direction': None, 'market_phase': 'coiling', 'phase_reason': 'Not enough data to assess structure.'}
+    micro = calculate_microstructure(df)
+    bos, choch = detect_bos_choch(df)
+    order_blocks = detect_order_blocks(df)
+    fvgs = detect_fvg(df)
+    sweeps = detect_liquidity_sweeps(df)
+    phase_context = phase_context or detect_market_phase(df)
+    score = 42
+    reasons = []
+    if micro.get('price_vs_vwap') == 'ABOVE':
+        score += 8
+        reasons.append('price holding above VWAP')
+    else:
+        score += 4
+        reasons.append('price trading near VWAP')
+    if micro.get('momentum') == 'BULLISH':
+        score += 6
+        reasons.append('short-term momentum bullish')
+    else:
+        score += 4
+        reasons.append('short-term momentum bearish')
+    if micro.get('rvol', 0) > 2.0:
+        score += 10
+        reasons.append('strong institutional volume')
+    elif micro.get('rvol', 0) < 0.5:
+        score -= 8
+        reasons.append('low volume / exhaustion risk')
+    if bos == 'BULLISH_BOS' or choch == 'BULLISH_CHOCH':
+        score += 10
+        reasons.append('bullish BOS/CHOCH')
+    elif bos == 'BEARISH_BOS' or choch == 'BEARISH_CHOCH':
+        score += 10
+        reasons.append('bearish BOS/CHOCH')
+    if order_blocks:
+        score += 6
+        reasons.append('order block present')
+    if fvgs:
+        score += 6
+        reasons.append('fair value gap present')
+    if sweeps:
+        score += 6
+        reasons.append('liquidity sweep detected')
+    phase = phase_context.get('phase')
+    if phase == 'continuation':
+        score += 8
+        reasons.append('continuation structure is present')
+    elif phase == 'reversal':
+        score += 6
+        reasons.append('reversal structure is forming')
+    elif phase == 'exhaustion':
+        score -= 5
+        reasons.append('exhaustion is present and needs caution')
+    entry_quality = phase_context.get('entry_quality')
+    if entry_quality == 'early':
+        score += 5
+        reasons.append('entry zone is still early and actionable')
+    elif entry_quality == 'late':
+        score -= 4
+        reasons.append('entry zone is late and may be chasing price')
+    if dxy_context and symbol in ['XAUUSD', 'EURUSD', 'BTCUSD']:
+        if dxy_context['trend'] == 'BULLISH' and dxy_context['price_vs_vwap'] == 'ABOVE':
+            score -= 6
+            reasons.append('DXY is suppressing the setup')
+        elif dxy_context['trend'] == 'BEARISH' and dxy_context['price_vs_vwap'] == 'BELOW':
+            score += 6
+            reasons.append('DXY is supporting the setup')
+    if news_context and news_context.get('within_2h'):
+        if news_context.get('bias') == 'opposite':
+            score -= 4
+            reasons.append('news risk reduces conviction')
+        else:
+            score += 2
+            reasons.append('news context remains supportive')
+    score = max(0, min(100, int(score)))
+    phase_dir = phase_context.get('direction')
+    candidate_direction = None
+    if phase_dir and score >= 70:
+        candidate_direction = phase_dir
+    elif score >= 75 and micro.get('momentum') == 'BULLISH':
+        candidate_direction = 'BUY'
+    elif score >= 75 and micro.get('momentum') == 'BEARISH':
+        candidate_direction = 'SELL'
+    return {
+        'structural_score': score,
+        'score_reason': '; '.join(reasons[-4:]),
+        'candidate_direction': candidate_direction,
+        'market_phase': phase,
+        'phase_reason': phase_context.get('reason', 'Structure is being assessed.'),
+        'entry_quality': entry_quality,
+        'entry_zone': phase_context.get('entry_zone')
+    }
+
+def build_setup_context(df, swings, current_price, symbol, dxy_context=None, news_context=None):
+    micro = calculate_microstructure(df)
+    phase_context = detect_market_phase(df, swings=swings)
+    continuation = detect_continuation(df)
+    reversal = detect_reversal(df)
+    exhaustion = detect_exhaustion(df)
+    atr = calculate_atr(df)
+    if continuation:
+        setup_type = 'continuation'
+        setup_bias = continuation.get('direction') or ('BUY' if micro.get('momentum') == 'BULLISH' else 'SELL')
+    elif reversal:
+        setup_type = 'reversal'
+        setup_bias = reversal.get('direction') or ('BUY' if micro.get('momentum') == 'BULLISH' else 'SELL')
+    elif exhaustion:
+        setup_type = 'exhaustion'
+        setup_bias = 'WAIT'
+    else:
+        setup_type = 'coiling'
+        setup_bias = 'WAIT'
+    entry_quality = phase_context.get('entry_quality', 'unknown')
+    timing_state = 'ready' if entry_quality == 'early' else 'watch' if entry_quality == 'acceptable' else 'late'
+    if setup_type == 'exhaustion' or entry_quality == 'late':
+        timing_state = 'late'
+    return {
+        'setup_type': setup_type,
+        'setup_bias': setup_bias,
+        'phase': phase_context.get('phase', 'coiling'),
+        'phase_reason': phase_context.get('reason', 'Structure is forming.'),
+        'entry_quality': entry_quality,
+        'entry_timing': timing_state,
+        'atr': atr,
+        'micro': micro
+    }
+
 def get_pair_config(symbol):
     base = {
         'digits': 2,
@@ -1022,730 +1367,466 @@ def get_pair_config(symbol):
     }
     return {**base, **overrides.get(symbol, {})}
 
-def calculate_structural_score(df, symbol, dxy_context=None, phase_context=None):
-    if df.empty or len(df) < 10:
-        return {'structural_score': 0, 'score_reason': 'Insufficient data', 'candidate_direction': None, 'market_phase': 'coiling', 'phase_reason': 'Not enough data to assess structure.'}
-    micro = calculate_microstructure(df)
-    bos, choch = detect_bos_choch(df)
-    order_blocks = detect_order_blocks(df)
-    fvgs = detect_fvg(df)
-    sweeps = detect_liquidity_sweeps(df)
-    phase_context = phase_context or detect_market_phase(df)
-    score = 42
-    reasons = []
-    if micro.get('price_vs_vwap') == 'ABOVE':
-        score += 8
-        reasons.append('price holding above VWAP')
-    else:
-        score += 4
-        reasons.append('price trading near VWAP')
-    if micro.get('momentum') == 'BULLISH':
-        score += 6
-        reasons.append('short-term momentum bullish')
-    else:
-        score += 4
-        reasons.append('short-term momentum bearish')
-    if micro.get('rvol', 0) > 2.0:
-        score += 10
-        reasons.append('strong institutional volume')
-    elif micro.get('rvol', 0) < 0.5:
-        score -= 8
-        reasons.append('low volume / exhaustion risk')
-    if bos == 'BULLISH_BOS' or choch == 'BULLISH_CHOCH':
-        score += 10
-        reasons.append('bullish BOS/CHOCH')
-    elif bos == 'BEARISH_BOS' or choch == 'BEARISH_CHOCH':
-        score += 10
-        reasons.append('bearish BOS/CHOCH')
-    if order_blocks:
-        score += 6
-        reasons.append('order block present')
-    if fvgs:
-        score += 6
-        reasons.append('fair value gap present')
-    if sweeps:
-        score += 6
-        reasons.append('liquidity sweep detected')
-    phase = phase_context.get('phase')
-    if phase == 'continuation':
-        score += 8
-        reasons.append('continuation structure is present')
-    elif phase == 'reversal':
-        score += 6
-        reasons.append('reversal structure is forming')
-    elif phase == 'exhaustion':
-        score -= 5
-        reasons.append('exhaustion is present and needs caution')
-    entry_quality = phase_context.get('entry_quality')
-    if entry_quality == 'early':
-        score += 5
-        reasons.append('entry zone is still early and actionable')
-    elif entry_quality == 'late':
-        score -= 4
-        reasons.append('entry zone is late and may be chasing price')
-    if dxy_context and symbol in ['XAUUSD', 'EURUSD', 'BTCUSD']:
-        if dxy_context['trend'] == 'BULLISH' and dxy_context['price_vs_vwap'] == 'ABOVE':
-            score -= 6
-            reasons.append('DXY is suppressing the setup')
-        elif dxy_context['trend'] == 'BEARISH' and dxy_context['price_vs_vwap'] == 'BELOW':
-            score += 6
-            reasons.append('DXY is supporting the setup')
-    score = max(0, min(100, int(score)))
-    phase_dir = phase_context.get('direction')
-    candidate_direction = None
-    if phase_dir and score >= 70:
-        candidate_direction = phase_dir
-    elif score >= 75 and micro.get('momentum') == 'BULLISH':
-        candidate_direction = 'BUY'
-    elif score >= 75 and micro.get('momentum') == 'BEARISH':
-        candidate_direction = 'SELL'
-    return {
-        'structural_score': score,
-        'score_reason': '; '.join(reasons[-4:]),
-        'candidate_direction': candidate_direction,
-        'market_phase': phase,
-        'phase_reason': phase_context.get('reason', 'Structure is being assessed.'),
-        'entry_quality': entry_quality,
-        'entry_zone': phase_context.get('entry_zone')
-    }
+# ── FRED API & News Knowledge ────────────────────────────────────────────
+NEWS_EVENT_KNOWLEDGE = {
+    "NONFARM PAYROLLS": ("stronger USD when actual beats consensus", "NFP causes a violent initial spike. Upside surprises strengthen USD and push XAUUSD/EURUSD down; downside surprises weaken USD and lift gold. Whipsaw first, then trend in the surprise direction."),
+    "CPI": ("stronger USD when inflation is hotter than consensus", "Hotter CPI raises yields and USD, pressuring XAUUSD/EURUSD; cooler CPI weakens USD and lifts gold. Reaction front-loaded in the first 15 minutes."),
+    "FOMC": ("hawkish = stronger USD, dovish = weaker USD", "FOMC reprices the rate path. Hawkish surprises lift USD and hit gold/EURUSD; dovish does the opposite. Watch dot plot and Powell tone."),
+    "GDP": ("stronger USD on upside surprise", "Strong GDP supports USD; weak GDP weighs. Milder reaction than CPI/NFP unless far from consensus."),
+    "UNEMPLOYMENT": ("lower unemployment = stronger USD", "Falling unemployment strengthens USD; rising weighs."),
+    "JOBLESS CLAIMS": ("fewer claims = stronger USD", "Weekly claims: lower prints support USD, higher prints weaken it. USD-sensitive MEDIUM impact."),
+    "RETAIL SALES": ("stronger USD on upside surprise", "Strong retail sales support USD; weak sales weigh on USD."),
+    "PMI": ("above-consensus PMI = stronger USD", "ISM/Flash PMI above expectations supports USD; below weighs. Watch the 50 line."),
+    "PPI": ("hotter PPI = stronger USD", "Producer inflation feeds CPI expectations; hotter prints support USD."),
+    "PCE": ("hotter core PCE = stronger USD", "Fed's preferred gauge. Hotter core PCE lifts USD and hits gold; cooler does the opposite."),
+    "FED": ("hawkish Fed = stronger USD", "Fed communication reprices rate expectations and moves USD across pairs."),
+    "INTEREST RATE": ("higher/hawkish = stronger USD", "Rate decisions move USD via yield differentials."),
+}
 
-def analyze_candle_structure(df):
-    if len(df) < 3:
-        return []
-    analysis = []
-    for i in range(max(0, len(df)-10), len(df)):
-        candle = df.iloc[i]
-        body = abs(candle['Close'] - candle['Open'])
-        total_range = candle['High'] - candle['Low']
-        if total_range == 0:
-            continue
-        upper_wick = candle['High'] - max(candle['Open'], candle['Close'])
-        lower_wick = min(candle['Open'], candle['Close']) - candle['Low']
-        body_ratio = body / total_range
-        upper_wick_ratio = upper_wick / total_range
-        lower_wick_ratio = lower_wick / total_range
-        candle_type = "BULLISH" if candle['Close'] > candle['Open'] else "BEARISH"
-        pattern = "NORMAL"
-        if body_ratio > 0.7:
-            pattern = "STRONG_" + candle_type
-        elif body_ratio < 0.3:
-            pattern = "DOJI"
-        elif upper_wick_ratio > 0.6:
-            pattern = "REJECTION_HIGH"
-        elif lower_wick_ratio > 0.6:
-            pattern = "REJECTION_LOW"
-        elif upper_wick_ratio > 0.4 and body_ratio < 0.4:
-            pattern = "SHOOTING_STAR" if candle_type == "BEARISH" else "HANGING_MAN"
-        elif lower_wick_ratio > 0.4 and body_ratio < 0.4:
-            pattern = "HAMMER" if candle_type == "BULLISH" else "INVERTED_HAMMER"
-        analysis.append({
-            'time': df.index[i],
-            'candle_type': candle_type,
-            'pattern': pattern,
-            'body_ratio': body_ratio,
-            'upper_wick_ratio': upper_wick_ratio,
-            'lower_wick_ratio': lower_wick_ratio,
-            'price': candle['Close'],
-            'volume': candle['Volume']
-        })
-    return analysis[-5:]
+FRED_SERIES_MAP = {
+    "NONFARM PAYROLLS": "PAYEMS",
+    "NON-FARM PAYROLLS": "PAYEMS",
+    "PAYROLL": "PAYEMS",
+    "UNEMPLOYMENT RATE": "UNRATE",
+    "UNEMPLOYMENT": "UNRATE",
+    "CORE CPI": "CPILFESL",
+    "CPI": "CPIAUCSL",
+    "CORE PCE": "PCEPILFE",
+    "PCE": "PCEPILFE",
+    "GDP": "GDP",
+    "FOMC": "FEDFUNDS",
+    "FED FUNDS": "FEDFUNDS",
+    "INTEREST RATE": "FEDFUNDS",
+    "RETAIL SALES": "RSAFS",
+    "JOBLESS CLAIMS": "ICSA",
+    "INITIAL CLAIMS": "ICSA",
+    "MICHIGAN": "UMCSENT",
+    "CONSUMER SENTIMENT": "UMCSENT",
+    "ISM": "INDPRO",
+    "PMI": "INDPRO",
+    "INDUSTRIAL PRODUCTION": "INDPRO",
+    "TREASURY": "DGS10",
+}
 
-def build_setup_context(df, swings, current_price, symbol, dxy_context=None):
-    micro = calculate_microstructure(df)
-    phase_context = detect_market_phase(df, swings=swings)
-    continuation = detect_continuation(df)
-    reversal = detect_reversal(df)
-    exhaustion = detect_exhaustion(df)
-    atr = calculate_atr(df)
-    if continuation:
-        setup_type = 'continuation'
-        setup_bias = continuation.get('direction') or ('BUY' if micro.get('momentum') == 'BULLISH' else 'SELL')
-    elif reversal:
-        setup_type = 'reversal'
-        setup_bias = reversal.get('direction') or ('BUY' if micro.get('momentum') == 'BULLISH' else 'SELL')
-    elif exhaustion:
-        setup_type = 'exhaustion'
-        setup_bias = 'WAIT'
-    else:
-        setup_type = 'coiling'
-        setup_bias = 'WAIT'
-    entry_quality = phase_context.get('entry_quality', 'unknown')
-    timing_state = 'ready' if entry_quality == 'early' else 'watch' if entry_quality == 'acceptable' else 'late'
-    if setup_type == 'exhaustion' or entry_quality == 'late':
-        timing_state = 'late'
-    return {
-        'setup_type': setup_type,
-        'setup_bias': setup_bias,
-        'phase': phase_context.get('phase', 'coiling'),
-        'phase_reason': phase_context.get('reason', 'Structure is forming.'),
-        'entry_quality': entry_quality,
-        'entry_timing': timing_state,
-        'atr': atr,
-        'micro': micro
-    }
-
-def _adx_value(df, period=14):
+def _match_fred_series(event_name):
     try:
-        high = pd.to_numeric(df["High"], errors="coerce")
-        low = pd.to_numeric(df["Low"], errors="coerce")
-        close = pd.to_numeric(df["Close"], errors="coerce")
-        if len(df) < period + 3:
-            return None
-        up = high.diff()
-        down = -low.diff()
-        plus_dm = pd.Series(np.where((up > down) & (up > 0), up, 0.0), index=df.index)
-        minus_dm = pd.Series(np.where((down > up) & (down > 0), down, 0.0), index=df.index)
-        tr = pd.concat([high - low, (high - close.shift()).abs(), (low - close.shift()).abs()], axis=1).max(axis=1)
-        atr = tr.ewm(alpha=1.0 / period, adjust=False).mean()
-        plus_di = 100 * plus_dm.ewm(alpha=1.0 / period, adjust=False).mean() / atr.replace(0, np.nan)
-        minus_di = 100 * minus_dm.ewm(alpha=1.0 / period, adjust=False).mean() / atr.replace(0, np.nan)
-        dx = 100 * (plus_di - minus_di).abs() / (plus_di + minus_di).replace(0, np.nan)
-        adx = dx.ewm(alpha=1.0 / period, adjust=False).mean()
-        vals = adx.dropna()
-        return float(vals.iloc[-1]) if not vals.empty else None
-    except Exception:
-        return None
-
-def classify_market_regime(df, adx_trend=25, adx_range=18):
-    adx = _adx_value(df)
-    if adx is None:
-        return {"regime": "UNKNOWN", "adx": None, "trend_direction": None, "tradable": True}
-    micro = calculate_microstructure(df) or {}
-    mom = micro.get("momentum")
-    if adx >= adx_trend:
-        return {"regime": "TRENDING", "adx": round(adx, 1), "trend_direction": mom, "tradable": True}
-    if adx >= adx_range:
-        return {"regime": "TRANSITIONAL", "adx": round(adx, 1), "trend_direction": mom, "tradable": True}
-    return {"regime": "RANGING", "adx": round(adx, 1), "trend_direction": None, "tradable": False}
-
-def strategy_htf_trend(symbol, all_data):
-    data = all_data.get(symbol, {}) or {}
-    votes = []
-    for key in ("H1", "H4"):
-        df = data.get(key)
-        if df is None or getattr(df, "empty", True):
-            continue
-        m = calculate_microstructure(df) or {}
-        if m.get("momentum") == "BULLISH" and m.get("price_vs_vwap") == "ABOVE":
-            votes.append("BUY")
-        elif m.get("momentum") == "BEARISH" and m.get("price_vs_vwap") == "BELOW":
-            votes.append("SELL")
-    if not votes:
-        return None
-    if all(v == "BUY" for v in votes):
-        return "BUY"
-    if all(v == "SELL" for v in votes):
-        return "SELL"
-    return None
-
-def strategy_zone_reversion(m10, current_price, swings, order_blocks, fvgs):
-    try:
-        atr = calculate_atr(m10) or (float(current_price) * 0.002)
-        near = float(atr) * 0.6
-        demand, supply = [], []
-        for ob in (order_blocks or []):
-            p = float(ob.get("price", 0) or 0)
-            if ob.get("type") == "BULLISH_OB" and p <= current_price:
-                demand.append(p)
-            if ob.get("type") == "BEARISH_OB" and p >= current_price:
-                supply.append(p)
-        for fvg in (fvgs or []):
-            if fvg.get("type") == "BULLISH_FVG" and float(fvg.get("bottom", 0)) <= current_price:
-                demand.append(float(fvg.get("bottom")))
-            if fvg.get("type") == "BEARISH_FVG" and float(fvg.get("top", 0)) >= current_price:
-                supply.append(float(fvg.get("top")))
-        for sl in (swings or {}).get("recent_swing_lows", []):
-            if float(sl) <= current_price:
-                demand.append(float(sl))
-        for sh in (swings or {}).get("recent_swing_highs", []):
-            if float(sh) >= current_price:
-                supply.append(float(sh))
-        near_demand = bool(demand) and (current_price - max(demand)) <= near
-        near_supply = bool(supply) and (min(supply) - current_price) <= near
-        if near_demand and not near_supply:
-            return "BUY"
-        if near_supply and not near_demand:
-            return "SELL"
+        name = str(event_name).upper()
+        for key, series_id in FRED_SERIES_MAP.items():
+            if key in name:
+                return series_id
     except Exception:
         pass
     return None
 
-def strategy_momentum_breakout(m10):
-    micro = calculate_microstructure(m10) or {}
-    bos, choch = detect_bos_choch(m10)
-    if micro.get("rvol", 0) >= 1.5:
-        if bos == "BULLISH_BOS" or choch == "BULLISH_CHOCH":
-            return "BUY"
-        if bos == "BEARISH_BOS" or choch == "BEARISH_CHOCH":
-            return "SELL"
-    return None
-
-def strategy_liquidity_rejection(m10):
-    rev = detect_reversal(m10)
-    if rev and rev.get("direction") == "BUY":
-        return "BUY"
-    if rev and rev.get("direction") == "SELL":
-        return "SELL"
-    sweeps = detect_liquidity_sweeps(m10)
-    if sweeps:
-        s = sweeps[-1]
-        if s.get("type") == "BULLISH_SWEEP":
-            return "BUY"
-        if s.get("type") == "BEARISH_SWEEP":
-            return "SELL"
-    return None
-
-def multi_strategy_vote(symbol, all_data, m10, current_price, swings, order_blocks, fvgs):
-    votes = {
-        "htf_trend": strategy_htf_trend(symbol, all_data),
-        "zone_reversion": strategy_zone_reversion(m10, current_price, swings, order_blocks, fvgs),
-        "momentum_breakout": strategy_momentum_breakout(m10),
-        "liquidity_rejection": strategy_liquidity_rejection(m10),
-    }
-    buy = [k for k, v in votes.items() if v == "BUY"]
-    sell = [k for k, v in votes.items() if v == "SELL"]
-    direction = None
-    if len(buy) >= 2 and (len(buy) - len(sell)) >= 2:
-        direction = "BUY"
-    elif len(sell) >= 2 and (len(sell) - len(buy)) >= 2:
-        direction = "SELL"
-    return {"direction": direction, "votes": votes, "buy_strategies": buy, "sell_strategies": sell}
-
-def htf_direction_gate(symbol, all_data):
-    return strategy_htf_trend(symbol, all_data)
-
-def _desk_position_lock(symbol, proposed, current_price):
+def fetch_fred_observations(series_id, limit=5):
     try:
-        active = st.session_state.active_signals.get(symbol)
-        if not active:
+        api_key = get_secret("FRED_API_KEY", "")
+        if not api_key:
             return None
-        prior_dir = active.get("direction")
-        prior_entry = float(active.get("entry") or 0)
-        ts = active.get("timestamp")
-        if prior_dir == proposed or prior_entry <= 0:
-            return None
-        age_min = (datetime.now() - ts).total_seconds() / 60.0 if ts else 999
-        risk_est = abs(prior_entry) * 0.004
-        if prior_dir == "BUY" and proposed == "SELL":
-            if current_price is not None and current_price <= prior_entry - risk_est:
-                return None
-            if age_min < 90:
-                return "A BUY from {:.2f} is still live and its invalidation has not been taken out. Blocking a premature SELL to prevent whipsaw.".format(prior_entry)
-        if prior_dir == "SELL" and proposed == "BUY":
-            if current_price is not None and current_price >= prior_entry + risk_est:
-                return None
-            if age_min < 90:
-                return "A SELL from {:.2f} is still live and its invalidation has not been taken out. Blocking a premature BUY to prevent whipsaw.".format(prior_entry)
-        return None
-    except Exception:
-        return None
-
-def build_candidate_levels(symbol, current_price, swings, order_blocks, fvgs, atr, pair_config):
-    plans = []
-    try:
-        current_price = float(current_price)
-    except Exception:
-        return plans
-    max_gap = min(
-        float(pair_config.get('max_entry_points', 10) or 10),
-        current_price * float(pair_config.get('max_entry_gap_pct', 0.003) or 0.003)
-    )
-    if atr:
-        max_gap = min(max_gap, float(atr) * float(pair_config.get('limit_zone_atr', 1.0)))
-    for signal in ('BUY', 'SELL'):
-        market_plan = build_structural_plan_v2(
-            signal=signal,
-            entry=current_price,
-            current_price=current_price,
-            swings=swings,
-            order_blocks=order_blocks,
-            fvgs=fvgs,
-            atr=atr,
-            pair_config=pair_config
-        )
-        if market_plan:
-            market_plan['plan'] = 'MARKET'
-            market_plan['signal'] = signal
-            plans.append(market_plan)
-    return plans
-
-def build_structural_plan_v2(signal, entry, current_price, swings, order_blocks, fvgs, atr, pair_config):
-    try:
-        entry = float(entry)
-        current_price = float(current_price)
-    except Exception:
-        return None
-    if signal not in ('BUY', 'SELL'):
-        return None
-    tick = float(pair_config.get('tick_size', 0.01) or 0.01)
-    if atr is None or float(atr) <= 0:
-        atr = abs(entry) * float(pair_config.get('min_dist_pct', 0.0015))
-        atr = float(atr)
-    stop_buffer = max(
-        atr * float(pair_config.get('stop_buffer_atr', 0.25)),
-        tick * 3.0
-    )
-    tp_buffer = max(
-        atr * float(pair_config.get('tp_buffer_atr', 0.12)),
-        tick * 2.0
-    )
-    min_stop_distance = max(
-        abs(entry) * float(pair_config.get('min_dist_pct', 0.0015)),
-        atr * float(pair_config.get('min_stop_atr', 1.0))
-    )
-    max_stop_price = abs(entry) * float(pair_config.get('max_risk_pct', 0.008))
-    max_stop_distance = min(max_stop_price, atr * float(pair_config.get('max_stop_atr', 3.0)))
-    sl_anchor, tp_anchor = get_structural_anchors(signal, entry, swings, order_blocks, fvgs)
-    target_rr = float(pair_config.get('target_rr', 2.0))
-    min_rr = float(pair_config.get('min_rr', 1.3))
-    max_rr = float(pair_config.get('max_rr', 3.0))
-    if signal == 'BUY':
-        if sl_anchor is not None:
-            sl = sl_anchor - stop_buffer
-        else:
-            sl = entry - min_stop_distance
-        risk = entry - sl
-        if risk < min_stop_distance:
-            sl = entry - min_stop_distance
-            risk = min_stop_distance
-        if risk > max_stop_distance:
-            sl = entry - max_stop_distance
-            risk = max_stop_distance
-        if risk <= 0:
-            return None
-        structure_target = (tp_anchor - tp_buffer) if tp_anchor is not None else None
-        tp = None
-        if structure_target is not None and structure_target > entry:
-            srr = (structure_target - entry) / risk
-            if srr >= min_rr:
-                tp = min(structure_target, entry + risk * max_rr)
-        if tp is None:
-            tp = min(entry + risk * target_rr, entry + risk * max_rr)
-        if (tp - entry) / risk < min_rr:
-            tp = entry + risk * min_rr
-        order_type = infer_order_type(signal, entry, current_price, pair_config, atr)
-        rr = round((tp - entry) / risk, 2) if risk > 0 else 0
-        return {
-            'entry': round_price(entry, pair_config),
-            'stop_loss': round_price(sl, pair_config),
-            'take_profit': [round_price(tp, pair_config)],
-            'rr_ratio': rr,
-            'risk_band': round_price(risk, pair_config),
-            'order_type': order_type,
-            'levels_source': 'PYTHON',
+        url = "https://api.stlouisfed.org/fred/series/observations"
+        params = {
+            "series_id": series_id,
+            "api_key": api_key,
+            "file_type": "json",
+            "sort_order": "desc",
+            "limit": limit,
         }
-    if signal == 'SELL':
-        if sl_anchor is not None:
-            sl = sl_anchor + stop_buffer
-        else:
-            sl = entry + min_stop_distance
-        risk = sl - entry
-        if risk < min_stop_distance:
-            sl = entry + min_stop_distance
-            risk = min_stop_distance
-        if risk > max_stop_distance:
-            sl = entry + max_stop_distance
-            risk = max_stop_distance
-        if risk <= 0:
+        res = requests.get(url, params=params, timeout=15)
+        res.raise_for_status()
+        data = res.json()
+        obs = data.get("observations", [])
+        obs = [o for o in obs if o.get("value") not in (".", None, "")]
+        if not obs:
             return None
-        structure_target = (tp_anchor + tp_buffer) if tp_anchor is not None else None
-        tp = None
-        if structure_target is not None and structure_target < entry:
-            srr = (entry - structure_target) / risk
-            if srr >= min_rr:
-                tp = max(structure_target, entry - risk * max_rr)
-        if tp is None:
-            tp = max(entry - risk * target_rr, entry - risk * max_rr)
-        if (entry - tp) / risk < min_rr:
-            tp = entry - risk * min_rr
-        order_type = infer_order_type(signal, entry, current_price, pair_config, atr)
-        rr = round((entry - tp) / risk, 2) if risk > 0 else 0
-        return {
-            'entry': round_price(entry, pair_config),
-            'stop_loss': round_price(sl, pair_config),
-            'take_profit': [round_price(tp, pair_config)],
-            'rr_ratio': rr,
-            'risk_band': round_price(risk, pair_config),
-            'order_type': order_type,
-            'levels_source': 'PYTHON',
-        }
-    return None
-
-def get_structural_anchors(signal, entry, swings, order_blocks, fvgs):
-    try:
-        entry = float(entry)
+        out = []
+        for o in obs:
+            try:
+                out.append({"date": o.get("date"), "value": float(o.get("value"))})
+            except Exception:
+                continue
+        return out or None
     except Exception:
-        return None, None
-    swing_highs = []
-    swing_lows = []
+        return None
+
+def fetch_fred_historical_context(event, ttl_seconds=3600):
     try:
-        swing_highs = [float(x) for x in (swings or {}).get('recent_swing_highs', []) if x]
-        swing_lows = [float(x) for x in (swings or {}).get('recent_swing_lows', []) if x]
+        name = str(event.get("event", "")).upper()
+        series_id = _match_fred_series(name)
+        if not series_id:
+            return None
+        cache_key = "_fred_cache_" + series_id
+        now = datetime.now()
+        cached = st.session_state.get(cache_key)
+        if cached and (now - cached.get("fetched_at", now)).total_seconds() < ttl_seconds:
+            return cached.get("text")
+        observations = fetch_fred_observations(series_id, limit=5)
+        if not observations:
+            return None
+        parts = []
+        for o in observations:
+            parts.append("{} = {}".format(o["date"], o["value"]))
+        text = "FRED {} last {} releases (most recent first): {}".format(
+            series_id, len(observations), "; ".join(parts))
+        st.session_state[cache_key] = {"text": text, "fetched_at": now}
+        return text
+    except Exception:
+        return None
+
+def fetch_news_historical_context(event):
+    try:
+        name = str(event.get("event", "")).upper()
+        curated = None
+        for key, (usd_impact, history) in NEWS_EVENT_KNOWLEDGE.items():
+            if key in name:
+                curated = "Typical USD impact: {} | Historical pattern: {}".format(usd_impact, history)
+                break
+        fred_data = fetch_fred_historical_context(event)
+        if fred_data and curated:
+            return fred_data + " || " + curated
+        if fred_data:
+            return fred_data
+        if curated:
+            return curated
     except Exception:
         pass
-    order_blocks = order_blocks or []
-    fvgs = fvgs or []
-    try:
-        if signal == 'BUY':
-            sl_candidates = []
-            sl_candidates.extend([x for x in swing_lows if x < entry])
-            sl_candidates.extend([
-                float(ob.get('price'))
-                for ob in order_blocks
-                if ob.get('type') == 'BULLISH_OB' and float(ob.get('price', 0) or 0) < entry
-            ])
-            sl_candidates.extend([
-                float(fvg.get('bottom'))
-                for fvg in fvgs
-                if fvg.get('type') == 'BULLISH_FVG' and float(fvg.get('bottom', 0) or 0) < entry
-            ])
-            tp_candidates = []
-            tp_candidates.extend([x for x in swing_highs if x > entry])
-            tp_candidates.extend([
-                float(ob.get('price'))
-                for ob in order_blocks
-                if ob.get('type') == 'BEARISH_OB' and float(ob.get('price', 0) or 0) > entry
-            ])
-            tp_candidates.extend([
-                float(fvg.get('top'))
-                for fvg in fvgs
-                if fvg.get('type') == 'BEARISH_FVG' and float(fvg.get('top', 0) or 0) > entry
-            ])
-            sl_anchor = max(sl_candidates) if sl_candidates else None
-            tp_anchor = min(tp_candidates) if tp_candidates else None
-            return sl_anchor, tp_anchor
-        if signal == 'SELL':
-            sl_candidates = []
-            sl_candidates.extend([x for x in swing_highs if x > entry])
-            sl_candidates.extend([
-                float(ob.get('price'))
-                for ob in order_blocks
-                if ob.get('type') == 'BEARISH_OB' and float(ob.get('price', 0) or 0) > entry
-            ])
-            sl_candidates.extend([
-                float(fvg.get('top'))
-                for fvg in fvgs
-                if fvg.get('type') == 'BEARISH_FVG' and float(fvg.get('top', 0) or 0) > entry
-            ])
-            tp_candidates = []
-            tp_candidates.extend([x for x in swing_lows if x < entry])
-            tp_candidates.extend([
-                float(ob.get('price'))
-                for ob in order_blocks
-                if ob.get('type') == 'BULLISH_OB' and float(ob.get('price', 0) or 0) < entry
-            ])
-            tp_candidates.extend([
-                float(fvg.get('bottom'))
-                for fvg in fvgs
-                if fvg.get('type') == 'BULLISH_FVG' and float(fvg.get('bottom', 0) or 0) < entry
-            ])
-            sl_anchor = min(sl_candidates) if sl_candidates else None
-            tp_anchor = max(tp_candidates) if tp_candidates else None
-            return sl_anchor, tp_anchor
-    except Exception:
-        return None, None
-    return None, None
+    return None
 
-def round_price(price, pair_config):
-    try:
-        if price is None:
-            return None
-        return round(float(price), int(pair_config.get('digits', 2)))
-    except Exception:
-        return None
+# ── News Fetching ────────────────────────────────────────────────────────
+def get_high_impact_news(selected_symbols=None, reference_dt=None):
+    now = datetime.now(timezone.utc)
+    endpoints = [
+        "https://nfs.faireconomy.media/ff_calendar_thisweek.json",
+        "https://nfs.faireconomy.media/ff_calendar_nextweek.json",
+    ]
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+        "Accept": "application/json,text/plain,*/*",
+    }
+    reference_dt = reference_dt or now
+    final = []
+    for url in endpoints:
+        try:
+            res = requests.get(url, params={"apifooter": "false"}, headers=headers, timeout=20)
+            res.raise_for_status()
+            text = res.text
+            if text.startswith("Title:") or "Markdown Content:" in text:
+                text = text.split("Markdown Content:", 1)[-1].strip()
+            payload = json.loads(text)
+            if isinstance(payload, dict):
+                payload = payload.get('events') or payload.get('items') or payload.get('data') or []
+            if not isinstance(payload, list):
+                continue
+            events = parse_news_payload(payload, reference_dt=reference_dt, lookahead_hours=168, only_high=False)
+            if events:
+                filtered_events = filter_relevant_news([{'event': e['event'], 'currency': e['currency'], 'impact': e['impact'], 'time': e['time'], 'event_time_utc': e['event_time_utc'], 'minutes_until': e['minutes_until'], 'within_2h': e['within_2h'], 'timezone': e['timezone']} for e in events], selected_symbols=selected_symbols, reference_dt=reference_dt)
+                final = [{'time': format_east_africa_time(e['event_time_utc']), 'currency': e['currency'], 'event': e['event'], 'impact': e['impact'], 'minutes_until': e['minutes_until'], 'within_2h': e['within_2h'], 'timezone': e['timezone'], 'event_time_utc': e['event_time_utc'], 'event_id': f"{e['event']}|{e['currency']}|{e['event_time_utc'].strftime('%Y-%m-%d %H:%M:%S')}"} for e in filtered_events]
+                if final:
+                    break
+        except Exception as exc:
+            print(f"⚠️ News fetch failed for {url}: {exc}")
+    return final
 
-def infer_order_type(signal, entry, current_price, pair_config, atr=None):
-    if signal not in ('BUY', 'SELL') or entry is None or current_price is None:
-        return 'MARKET'
-    try:
-        entry = float(entry)
-        current_price = float(current_price)
-    except Exception:
-        return 'MARKET'
-    tick = float(pair_config.get('tick_size', 0.01) or 0.01)
-    market_tolerance = max(
-        tick * 3.0,
-        float(atr or 0.0) * float(pair_config.get('market_zone_atr', 0.20))
-    )
-    if abs(entry - current_price) <= market_tolerance:
-        return 'MARKET'
-    if signal == 'BUY':
-        return 'LIMIT' if entry < current_price else 'STOP'
-    return 'LIMIT' if entry > current_price else 'STOP'
+def sync_news_event_statuses(news_events, selected_symbols=None):
+    statuses = st.session_state.news_event_statuses
+    for event in news_events:
+        event_id = event.get('event_id') or f"{event.get('event')}|{event.get('currency')}|{event.get('time')}"
+        if not statuses.get(event_id):
+            statuses[event_id] = {'event': event.get('event'), 'currency': event.get('currency'), 'time': event.get('time'), 'status': 'waiting', 'detail': 'Waiting for AI pre-news analysis (sent once, >=2h before release).'}
+    stale_ids = [k for k in statuses if not any(e.get('event_id') == k for e in news_events)]
+    for stale_id in stale_ids:
+        del statuses[stale_id]
+        st.session_state.news_signal_sent.pop(stale_id, None)
+        st.session_state.news_results.pop(stale_id, None)
+    st.session_state.news_event_statuses = statuses
 
-def check_level_math(signal, order_type, entry, sl, tp, current_price, atr, pair_config):
-    try:
-        entry = float(entry)
-        sl = float(sl)
-        tp = float(tp)
-        current_price = float(current_price)
-    except Exception:
-        return False, "Missing or non-numeric entry/SL/TP."
-    if entry <= 0 or sl <= 0 or tp <= 0 or current_price <= 0:
-        return False, "Entry, SL, TP, and current price must be positive."
-    max_entry_gap = min(
-        float(pair_config.get('max_entry_points', 10) or 10),
-        current_price * float(pair_config.get('max_entry_gap_pct', 0.003) or 0.003)
-    )
-    if atr:
-        max_entry_gap = min(max_entry_gap, float(atr) * float(pair_config.get('limit_zone_atr', 1.0)))
-    if abs(entry - current_price) > max_entry_gap:
-        return False, f"Entry too far from live price. Gap={abs(entry - current_price):.6f}, max={max_entry_gap:.6f}."
-    order_type = str(order_type or '').upper()
-    if order_type == 'LIMIT':
-        if signal == 'BUY' and entry >= current_price:
-            return False, "BUY LIMIT must be below current price."
-        if signal == 'SELL' and entry <= current_price:
-            return False, "SELL LIMIT must be above current price."
-    if order_type == 'STOP':
-        if signal == 'BUY' and entry <= current_price:
-            return False, "BUY STOP must be above current price."
-        if signal == 'SELL' and entry >= current_price:
-            return False, "SELL STOP must be below current price."
-    min_stop_distance = max(
-        abs(entry) * float(pair_config.get('min_dist_pct', 0.0015)),
-        float(atr or 0.0) * float(pair_config.get('min_stop_atr', 1.0))
-    )
-    max_stop_price = abs(entry) * float(pair_config.get('max_risk_pct', 0.008))
-    if atr:
-        max_stop_distance = min(max_stop_price, float(atr) * float(pair_config.get('max_stop_atr', 3.0)))
-    else:
-        max_stop_distance = max_stop_price
-    if signal == 'BUY':
-        if sl >= entry:
-            return False, f"BUY SL must be below entry. SL={sl}, entry={entry}."
-        if tp <= entry:
-            return False, f"BUY TP must be above entry. TP={tp}, entry={entry}."
-        risk = entry - sl
-        reward = tp - entry
-    elif signal == 'SELL':
-        if sl <= entry:
-            return False, f"SELL SL must be above entry. SL={sl}, entry={entry}."
-        if tp >= entry:
-            return False, f"SELL TP must be below entry. TP={tp}, entry={entry}."
-        risk = sl - entry
-        reward = entry - tp
-    else:
-        return False, "Invalid signal."
-    if risk <= 0:
-        return False, "Risk distance must be positive."
-    if risk < min_stop_distance * 0.95:
-        return False, f"Stop too tight. Risk={risk:.6f}, min={min_stop_distance:.6f}."
-    if risk > max_stop_distance * 1.05:
-        return False, f"Stop too wide. Risk={risk:.6f}, max={max_stop_distance:.6f}."
-    rr = reward / risk if risk > 0 else 0
-    min_rr = float(pair_config.get('min_rr', pair_config.get('target_rr', 1.3)))
-    max_rr = float(pair_config.get('max_rr', 3.0))
-    if rr + 0.01 < min_rr:
-        return False, f"RR too low. RR={rr:.2f}, min={min_rr:.2f}."
-    if rr > max_rr * 1.05:
-        return False, f"RR too high / TP too far from entry. RR={rr:.2f}, max={max_rr:.2f}."
-    return True, "Valid"
+def update_news_event_status(event, status, detail=None):
+    if not event:
+        return
+    event_id = event.get('event_id') or f"{event.get('event')}|{event.get('currency')}|{event.get('time')}"
+    st.session_state.news_event_statuses[event_id] = {'event': event.get('event'), 'currency': event.get('currency'), 'time': event.get('time'), 'status': status, 'detail': detail or ''}
 
-def finalize_trade_plan(analysis, symbol, current_price, swings, order_blocks, fvgs, atr, pair_config):
-    if not isinstance(analysis, dict):
-        return analysis
-    signal = analysis.get('signal')
-    if signal not in ('BUY', 'SELL'):
-        return analysis
+# ── Rich News Analysis Prompt ────────────────────────────────────────────
+def build_news_analysis_prompt():
+    return """You are an elite news-driven macro analyst operating with the discipline of a professional trading desk. You analyze high-impact USD-sensitive news BEFORE it is released using a SYSTEMATIC MULTI-LAYER ANALYSIS to project how the event will affect trading pairs AT THE TIME of the news reading.
+═══════════════════════════════════════════════════════════════════════════════
+SYSTEMATIC ANALYSIS FRAMEWORK (FOLLOW IN ORDER):
+═══════════════════════════════════════════════════════════════════════════════
+LAYER 1 - HISTORICAL RELEASE PATTERN ANALYSIS:
+- Recall the LAST 3-4 RELEASES of this specific event type
+- For each release: What was the previous value? What was the consensus? What was the actual? What was the surprise?
+- How did the market react to each surprise? (direction, magnitude, duration)
+- What is the typical consensus expectation for THIS release?
+- What would constitute a surprise vs consensus for THIS release?
+LAYER 2 - CURRENT MARKET POSITIONING ANALYSIS:
+- Analyze the CURRENT MARKET STRUCTURE provided (structure context, HTF context)
+- Where is price positioned relative to key levels? (premium/discount, key support/resistance)
+- What is the current momentum and trend across timeframes?
+- What is the current RSI positioning across timeframes?
+- What is the current DXY trend and positioning?
+- Based on current positioning, is the market positioned FOR or AGAINST the expected news outcome?
+LAYER 3 - NEWS IMPACT MECHANICS:
+- How does THIS specific event type typically affect the US Dollar?
+- How does THIS specific event type typically affect EACH SYMBOL (XAUUSD, EURUSD, BTCUSD, US30)?
+- What is the typical reaction pattern? (immediate spike, delayed reaction, fade, continuation)
+- What time of day is the release? (affects liquidity and reaction magnitude)
+- What is the current market session? (affects liquidity and reaction magnitude)
+LAYER 4 - CROSS-ASSET CORRELATION ANALYSIS:
+- How do different symbols typically react to THIS event type?
+- Are there any cross-asset correlations that confirm or contradict the expected move?
+- Are there any divergences between assets that suggest a specific outcome?
+LAYER 5 - SYNTHESIS AND DIRECTIONAL EDGE:
+- Combine all layers to determine the EXPECTED NEWS OUTCOME (stronger/weaker USD)
+- Determine the EXPECTED SYMBOL REACTION for each symbol
+- Determine if current positioning is FOR or AGAINST the expected outcome
+- Determine the directional edge: Should the trader be positioned LONG or SHORT when the news drops?
+DATA PROVIDED:
+{data_summary}
+MICROSTRUCTURE (M10):
+{microstructure_data}
+STRUCTURE CONTEXT:
+{structure_context}
+RSI VALUES (MULTI-TIMEFRAME):
+{rsi_values}
+PREMIUM/DISCOUNT POSITION:
+{premium_discount}
+VOLATILITY (ATR):
+{volatility_context}
+HTF CONTEXT (H1/H4):
+{htf_context}
+DXY (US Dollar Index) TREND:
+{dxy_data}
+HISTORICAL CONTEXT:
+{historical_context}
+NEWS EVENT DETAILS:
+{news_summary}
+STRUCTURAL SCORE (PYTHON):
+{structural_score_context}
+PYTHON DIRECTIONAL LEDGER (REFERENCE EVIDENCE):
+{directional_ledger}
+═══════════════════════════════════════════════════════════════════════════════
+MANDATORY ANALYSIS RULES:
+═══════════════════════════════════════════════════════════════════════════════
+1. COMPLETE ALL 5 LAYERS OF ANALYSIS before determining the final signal
+2. For EACH SYMBOL, determine:
+- Expected USD impact (stronger/weaker/neutral)
+- Expected symbol reaction (up/down/neutral)
+- Current positioning (for/against the expected move)
+- Final directional edge (long/short/neutral)
+3. Be SPECIFIC about historical patterns - cite specific previous releases and reactions
+4. ALWAYS USE THE PROVIDED HISTORICAL CONTEXT: explicitly cite the last 3-4 releases (previous, consensus, actual, surprise) from the `HISTORICAL CONTEXT` field included in the DATA PROVIDED. If precise release numbers are not available in the field, state that explicitly and infer the pattern from the summary.
+5. Be SPECIFIC about current positioning - cite specific levels and indicators
+6. Be SPECIFIC about the expected reaction - cite the mechanism and timing
+7. Output BUY or SELL when there is a clear directional edge
+8. NEVER output WAIT for a news signal. Always pick BUY or SELL with detailed reasoning.
+9. DO NOT output Entry, SL, or TP levels - focus ONLY on direction and reasoning
+10. Write DETAILED reasoning (minimum 200 words) that shows your complete analysis process
+OUTPUT STRICT JSON ONLY (NO MARKDOWN, NO CODE FENCES):
+{{
+"market_state": "continuation|reversal|exhaustion|trend|coiling",
+"bias": "BULLISH|BEARISH|RANGING",
+"signal": "BUY|SELL",
+"confluence_score": 0,
+"confidence": "HIGH|MEDIUM|LOW",
+"dxy_correlation": "CONFIRMING|CONTRADICTING|NEUTRAL",
+"microstructure_read": "Brief summary of VWAP/RVOL status",
+"pre_news_bias": "Detailed explanation of expected USD impact and symbol reaction",
+"directional_evidence": {{"bullish": ["..."], "bearish": ["..."]}},
+"historical_pattern": "Detailed analysis of last 3-4 releases: previous values, consensus, actual, surprises, and market reactions",
+"current_positioning": "Detailed analysis of current market positioning relative to expected news outcome",
+"news_impact_mechanics": "Detailed explanation of how this event type affects USD and each symbol, including typical reaction patterns and timing",
+"reasoning": "Complete synthesis of all 5 layers showing your complete analysis process (minimum 200 words)",
+"rejection_reason": "If WAIT, detailed explanation of why there is no clear directional edge"
+}}"""
+
+# ── Groq API Integration (Robust Pattern) ────────────────────────────────
+def estimate_tokens_for_text(text):
+    return max(1, int(len(text) / 4))
+
+def estimate_analysis_tokens(system_prompt, user_content):
+    prompt_text = system_prompt + ' ' + ' '.join([item.get('text', '') for item in user_content if isinstance(item, dict)])
+    return estimate_tokens_for_text(prompt_text) + GROQ_ESTIMATED_RESPONSE_TOKENS
+
+def reserve_groq_tokens(estimated_tokens):
+    now = datetime.now()
+    window_start = st.session_state.groq_token_window_start
+    if (now - window_start).total_seconds() >= 60:
+        st.session_state.groq_token_window_start = now
+        st.session_state.groq_tokens_used = 0
+    if estimated_tokens is None:
+        estimated_tokens = 0
+    if st.session_state.groq_tokens_used + estimated_tokens > GROQ_TOKEN_LIMIT_PER_MINUTE:
+        next_reset = st.session_state.groq_token_window_start + timedelta(minutes=1)
+        st.session_state.groq_rate_limit_until = next_reset
+        st.session_state.groq_rate_limit_reason = f"Token budget exceeded: {st.session_state.groq_tokens_used}/{GROQ_TOKEN_LIMIT_PER_MINUTE} used. Needs {estimated_tokens} more tokens and resets at {next_reset.strftime('%H:%M:%S')}."
+        return False
+    st.session_state.groq_rate_limit_reason = ''
+    return True
+
+def is_groq_rate_limited():
+    retry_until = st.session_state.get('groq_rate_limit_until')
+    return retry_until is not None and datetime.now() < retry_until
+
+def get_groq_models(api_key):
     try:
-        current_price = float(current_price)
-    except Exception:
-        return analysis
-    entry = analysis.get('entry')
-    try:
-        entry = float(entry)
-    except Exception:
-        entry = None
-    max_entry_gap = min(
-        float(pair_config.get('max_entry_points', 10) or 10),
-        current_price * float(pair_config.get('max_entry_gap_pct', 0.003) or 0.003)
-    )
-    if atr:
-        max_entry_gap = min(max_entry_gap, float(atr) * float(pair_config.get('limit_zone_atr', 1.0)))
-    if entry is None or entry <= 0 or abs(entry - current_price) > max_entry_gap:
-        entry = current_price
-        analysis['order_type'] = 'MARKET'
-        analysis['levels_source'] = 'PYTHON'
-        analysis['reasoning'] = (
-            f"{analysis.get('reasoning', '')} "
-            "Entry was re-anchored to live price because the proposed entry was missing, invalid, or too far from market."
-        ).strip()
-    inferred_order_type = infer_order_type(signal, entry, current_price, pair_config, atr)
-    requested_order_type = str(analysis.get('order_type') or '').upper()
-    if requested_order_type not in ('MARKET', 'LIMIT', 'STOP') or requested_order_type != inferred_order_type:
-        analysis['order_type'] = inferred_order_type
-    analysis['entry'] = round_price(entry, pair_config)
-    sl = analysis.get('stop_loss')
-    tp_list = analysis.get('take_profit', [])
-    tp = tp_list[0] if tp_list else None
-    ok, reason = check_level_math(
-        signal=signal,
-        order_type=analysis.get('order_type'),
-        entry=entry,
-        sl=sl,
-        tp=tp,
-        current_price=current_price,
-        atr=atr,
-        pair_config=pair_config
-    )
-    if not ok:
-        plan = build_structural_plan_v2(
-            signal=signal,
-            entry=entry,
-            current_price=current_price,
-            swings=swings,
-            order_blocks=order_blocks,
-            fvgs=fvgs,
-            atr=atr,
-            pair_config=pair_config
+        response = requests.get(
+            f"{GROQ_API_URL.rsplit('/chat/completions', 1)[0]}/models",
+            headers={"Authorization": f"Bearer {api_key}"},
+            timeout=20
         )
-        if not plan:
-            analysis['signal'] = 'WAIT'
-            analysis['confidence'] = 'LOW'
-            analysis['rejection_reason'] = f"No executable structural plan. Level check failed: {reason}"
-            return analysis
-        analysis.update(plan)
-    analysis['entry'] = round_price(analysis.get('entry'), pair_config)
-    analysis['stop_loss'] = round_price(analysis.get('stop_loss'), pair_config)
-    if analysis.get('take_profit'):
-        analysis['take_profit'] = [
-            round_price(x, pair_config)
-            for x in analysis.get('take_profit')
-            if x is not None
+        if response.status_code != 200:
+            return GROQ_MODELS
+        payload = response.json()
+        available = [item.get('id') for item in payload.get('data', []) if item.get('id')]
+        preferred = [model for model in GROQ_MODELS if model in available]
+        additional = [
+            model for model in available
+            if model not in preferred
+            and not any(blocked in model.lower() for blocked in ('whisper', 'guard', 'safety', 'tts', 'distil'))
         ]
-    final_entry = analysis.get('entry')
-    final_sl = analysis.get('stop_loss')
-    final_tp = (analysis.get('take_profit') or [None])[0]
-    ok_final, reason_final = check_level_math(
-        signal=analysis.get('signal'),
-        order_type=analysis.get('order_type'),
-        entry=final_entry,
-        sl=final_sl,
-        tp=final_tp,
-        current_price=current_price,
-        atr=atr,
-        pair_config=pair_config
-    )
-    if not ok_final:
-        analysis['signal'] = 'WAIT'
-        analysis['confidence'] = 'LOW'
-        analysis['rejection_reason'] = f"Final level validation failed: {reason_final}"
-        return analysis
-    entry_f = float(analysis['entry'])
-    sl_f = float(analysis['stop_loss'])
-    tp_f = float(analysis['take_profit'][0])
-    if analysis['signal'] == 'BUY':
-        risk = entry_f - sl_f
-        reward = tp_f - entry_f
-    else:
-        risk = sl_f - entry_f
-        reward = entry_f - tp_f
-    analysis['rr_ratio'] = round(reward / risk, 2) if risk > 0 else 0
-    analysis['risk_band'] = round_price(risk, pair_config)
-    analysis.setdefault('levels_source', 'HYBRID')
-    return analysis
+        models = preferred + additional
+        return models or GROQ_MODELS
+    except Exception:
+        return GROQ_MODELS
 
+def call_groq(system_prompt, user_content, max_tokens=GROQ_MAX_OUTPUT_TOKENS, retry_count=0, estimated_tokens=None):
+    api_key = get_secret("GROQ_API_KEY", "").strip()
+    if not api_key:
+        return {"signal": "WAIT", "confluence_score": 0, "confidence": "LOW",
+                "rejection_reason": "Missing Groq API Key.",
+                "model_used": "Groq unavailable", "estimated_tokens": 0,
+                "api_status": "MISSING_KEY"}
+    if estimated_tokens is None:
+        estimated_tokens = estimate_analysis_tokens(system_prompt, user_content)
+    
+    messages = [{"role": "system", "content": system_prompt}]
+    for item in user_content:
+        if isinstance(item, dict) and item.get("type") == "text":
+            messages.append({"role": "user", "content": item.get("text", "")})
+        elif isinstance(item, str):
+            messages.append({"role": "user", "content": item})
+            
+    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+    request_started = False
+    model_errors = []
+    models = get_groq_models(api_key)
+    
+    for model in models:
+        try:
+            if is_groq_rate_limited():
+                return {"signal": "WAIT", "confluence_score": 0, "confidence": "LOW",
+                        "rejection_reason": "RATE_LIMIT", "model_used": model,
+                        "estimated_tokens": estimated_tokens, "api_status": "RATE_LIMIT"}
+            time_since_last = (datetime.now() - st.session_state.last_groq_request_time).total_seconds() if st.session_state.last_groq_request_time else None
+            if not request_started and time_since_last is not None and time_since_last < GROQ_MIN_REQUEST_INTERVAL:
+                wait_time = int(GROQ_MIN_REQUEST_INTERVAL - time_since_last)
+                st.session_state.groq_rate_limit_until = datetime.now() + timedelta(seconds=wait_time)
+                return {"signal": "WAIT", "confluence_score": 0, "confidence": "LOW",
+                        "rejection_reason": "RATE_LIMIT", "model_used": model,
+                        "estimated_tokens": estimated_tokens, "api_status": "SPACING_LIMIT"}
+            if not reserve_groq_tokens(estimated_tokens):
+                return {"signal": "WAIT", "confluence_score": 0, "confidence": "LOW",
+                        "rejection_reason": "RATE_LIMIT", "model_used": model,
+                        "estimated_tokens": estimated_tokens, "api_status": "TOKEN_BUDGET"}
+            
+            payload = {
+                "model": model,
+                "messages": messages,
+                "temperature": 0.2,
+                "max_tokens": min(int(max_tokens), GROQ_MAX_OUTPUT_TOKENS),
+                "response_format": {"type": "json_object"}
+            }
+            res = requests.post(GROQ_API_URL, headers=headers, json=payload, timeout=120)
+            st.session_state.last_groq_request_time = datetime.now()
+            request_started = True
+            
+            if res.status_code == 429:
+                retry_after = int(res.headers.get('Retry-After', '60')) if res.headers.get('Retry-After') else 60
+                error_text = res.text[:500]
+                model_errors.append(f"{model}: HTTP 429 {error_text}")
+                st.session_state.groq_rate_limit_until = datetime.now() + timedelta(seconds=retry_after)
+                return {"signal": "WAIT", "confluence_score": 0, "confidence": "LOW",
+                    "rejection_reason": f"RATE_LIMIT: {error_text}", "model_used": model,
+                    "estimated_tokens": estimated_tokens, "api_status": "RATE_LIMIT_429",
+                    "raw_output": error_text}
+            if res.status_code != 200:
+                error_text = res.text[:500]
+                model_errors.append(f"{model}: HTTP {res.status_code} {error_text}")
+                continue
+                
+            res_data = res.json()
+            usage = res_data.get("usage", {})
+            prompt_tokens = usage.get("prompt_tokens", 0)
+            completion_tokens = usage.get("completion_tokens", 0)
+            total_tokens = usage.get("total_tokens", prompt_tokens + completion_tokens)
+            choices = res_data.get("choices", [])
+            if not choices:
+                return {"signal": "WAIT", "confluence_score": 0, "confidence": "LOW",
+                        "rejection_reason": "No choices returned",
+                        "model_used": model, "api_status": "NO_CANDIDATES",
+                        "total_tokens": total_tokens, "prompt_tokens": prompt_tokens,
+                        "completion_tokens": completion_tokens}
+            
+            content = choices[0].get("message", {}).get("content", "")
+            if isinstance(content, list):
+                content = "\n".join(part.get("text", "") for part in content if isinstance(part, dict))
+            content = str(content).strip()
+            
+            content = re.sub(r'^```(?:json)?\s*', '', content, flags=re.IGNORECASE).strip()
+            content = re.sub(r'\s*```$', '', content).strip()
+            
+            try:
+                cleaned = re.sub(r',\s*([}\]])', r'\1', content)
+                result = json.loads(cleaned)
+            except json.JSONDecodeError:
+                first = content.find('{')
+                last = content.rfind('}')
+                if first != -1 and last != -1 and last > first:
+                    substring = content[first:last+1]
+                    try:
+                        substring_clean = re.sub(r',\s*([}\]])', r'\1', substring)
+                        result = json.loads(substring_clean)
+                    except Exception:
+                        return {"signal": "WAIT", "confluence_score": 0, "confidence": "LOW",
+                                "rejection_reason": "PARSE_ERROR",
+                                "raw_output": content[:2000], "model_used": model,
+                                "api_status": "PARSE_ERROR",
+                                "total_tokens": total_tokens, "prompt_tokens": prompt_tokens,
+                                "completion_tokens": completion_tokens}
+                else:
+                    return {"signal": "WAIT", "confluence_score": 0, "confidence": "LOW",
+                            "rejection_reason": "PARSE_ERROR",
+                            "raw_output": content[:2000], "model_used": model,
+                            "api_status": "PARSE_ERROR",
+                            "total_tokens": total_tokens}
+                            
+            result['model_used'] = model
+            result['estimated_tokens'] = estimated_tokens
+            result['total_tokens'] = total_tokens
+            result['prompt_tokens'] = prompt_tokens
+            result['completion_tokens'] = completion_tokens
+            result['api_status'] = 'SUCCESS'
+            st.session_state.groq_tokens_used += total_tokens
+            st.session_state.groq_rate_limit_until = None
+            st.session_state.groq_rate_limit_reason = ''
+            return result
+        except requests.exceptions.Timeout:
+            model_errors.append(f"{model}: request timed out")
+            continue
+        except Exception as e:
+            model_errors.append(f"{model}: {str(e)}")
+            if model == models[-1]:
+                return {"signal": "WAIT", "confluence_score": 0, "confidence": "LOW",
+                        "rejection_reason": f"Error: {str(e)}", "model_used": "None",
+                        "api_status": "EXCEPTION", "estimated_tokens": estimated_tokens}
+            continue
+            
+    return {"signal": "WAIT", "confluence_score": 0, "confidence": "LOW",
+            "rejection_reason": "Error: all Groq models failed. " + " | ".join(model_errors[-3:]),
+            "model_used": "None", "api_status": "ALL_MODELS_FAILED",
+            "estimated_tokens": estimated_tokens,
+            "raw_output": "\n".join(model_errors[-3:])}
+
+# ── News Analysis Engine ─────────────────────────────────────────────────
 def normalize_ai_signal(signal):
     if not isinstance(signal, str):
         return signal
@@ -1767,713 +1848,32 @@ def normalize_analysis_signals(analysis):
         analysis['candidate_direction'] = normalize_ai_signal(analysis['candidate_direction'])
     return analysis
 
-def validate_ai_logic(analysis):
-    signal = analysis.get('signal')
-    reasoning = (analysis.get('reasoning') or '').lower()
-    micro_read = (analysis.get('microstructure_read') or '').lower()
-    buy_bad = ['invalidates the buy', 'invalidates the long', 'invalid buy', 'invalid long',
-               'buy setup is invalid', 'long setup is invalid', 'do not buy', "don't buy",
-               'avoid buying', 'no buy setup', 'buy is invalidated']
-    sell_bad = ['invalidates the sell', 'invalidates the short', 'invalid sell', 'invalid short',
-                'sell setup is invalid', 'short setup is invalid', 'do not sell', "don't sell",
-                'avoid selling', 'no sell setup', 'sell is invalidated']
-    if signal == 'BUY':
-        if any(p in reasoning for p in buy_bad):
-            return False, 'The reasoning explicitly invalidates the BUY setup.'
-        if any(t in micro_read for t in ['exhaustion', 'trap']):
-            if not any(t in reasoning for t in ['pullback', 'retest', 'reclaim', 'confirmation', 'liquidity', 'sweep', 'zone', 'order block', 'fvg']):
-                return False, 'Microstructure suggests a trap or exhaustion and the reasoning lacks a clear continuation or invalidation framework.'
-    elif signal == 'SELL':
-        if any(p in reasoning for p in sell_bad):
-            return False, 'The reasoning explicitly invalidates the SELL setup.'
-        if any(t in micro_read for t in ['exhaustion', 'trap']):
-            if not any(t in reasoning for t in ['pullback', 'retest', 'reclaim', 'confirmation', 'liquidity', 'sweep', 'zone', 'order block', 'fvg']):
-                return False, 'Microstructure suggests a trap or exhaustion and the reasoning lacks a clear continuation or invalidation framework.'
-    return True, 'Valid'
-
-def validate_signal_math(analysis, pair_config=None):
-    signal = analysis.get('signal')
-    if signal not in ['BUY', 'SELL']:
-        return False, 'Invalid signal direction.'
-    pair_config = pair_config or {}
-    entry = analysis.get('entry')
-    sl = analysis.get('stop_loss')
-    tp_list = analysis.get('take_profit', [])
-    tp1 = tp_list[0] if tp_list else None
-    if entry is None or sl is None or tp1 is None:
-        return False, 'Missing entry, SL, or TP values after finalization.'
-    try:
-        entry = float(entry)
-        sl = float(sl)
-        tp1 = float(tp1)
-    except Exception:
-        return False, 'Entry, SL, and TP must be numeric.'
-    if signal == 'BUY':
-        if tp1 <= entry:
-            return False, f'Invalid Math: For BUY, TP1 ({tp1}) MUST be > Entry ({entry}).'
-        if sl >= entry:
-            return False, f'Invalid Math: For BUY, SL ({sl}) MUST be < Entry ({entry}).'
-    elif signal == 'SELL':
-        if tp1 >= entry:
-            return False, f'Invalid Math: For SELL, TP1 ({tp1}) MUST be < Entry ({entry}).'
-        if sl <= entry:
-            return False, f'Invalid Math: For SELL, SL ({sl}) MUST be > Entry ({entry}).'
-    risk = abs(entry - sl)
-    reward = abs(entry - tp1)
-    if risk <= 0:
-        return False, 'Risk distance must be positive.'
-    min_rr = float(pair_config.get('min_rr', pair_config.get('target_rr', 1.3)))
-    if (reward / risk) + 0.01 < min_rr:
-        return False, f'Invalid Math: R:R is too low ({(reward / risk):.2f}). Minimum required is 1:{min_rr:.2f}.'
-    return True, 'Valid'
-
-def apply_dxy_guardrails(analysis, symbol, dxy_context):
-    if symbol not in ['XAUUSD', 'EURUSD', 'BTCUSD'] or not dxy_context:
+def sanitize_news_event_analysis(analysis):
+    if not isinstance(analysis, dict):
         return analysis
-    trend = dxy_context.get('trend')
-    price_vs_vwap = dxy_context.get('price_vs_vwap')
-    reasoning = (analysis.get('reasoning') or '').lower()
-    signal = analysis.get('signal')
-    if trend == 'BULLISH' and price_vs_vwap == 'ABOVE':
-        expected_bias = 'SELL'
-    elif trend == 'BEARISH' and price_vs_vwap == 'BELOW':
-        expected_bias = 'BUY'
-    else:
-        expected_bias = None
-    if expected_bias is None:
-        analysis['dxy_correlation'] = 'NEUTRAL'
-        return analysis
-    if signal == expected_bias:
-        analysis['dxy_correlation'] = 'CONFIRMING'
-        if 'dxy' not in reasoning and 'dollar' not in reasoning:
-            analysis['reasoning'] = f"{analysis.get('reasoning', '')} DXY is confirming the directional bias because the dollar index is {trend.lower()} and price is {price_vs_vwap.lower()} VWAP."
-        return analysis
-    analysis['dxy_correlation'] = 'CONTRADICTING'
-    if analysis.get('confidence') == 'HIGH':
-        analysis['confidence'] = 'MEDIUM'
-        analysis['confluence_score'] = max(0, analysis.get('confluence_score', 0) - 4)
-    if 'dxy' not in reasoning and 'dollar' not in reasoning:
-        analysis['reasoning'] = f"{analysis.get('reasoning', '')} The setup is contrarian versus the DXY bias, so it needs an explicit macro explanation to justify the trade."
+    for key in [
+        'entry', 'stop_loss', 'take_profit', 'order_type', 'order_description',
+        'order_blocks', 'fvgs', 'sweeps', 'candidate_levels', 'levels_source',
+        'market_state', 'setup_context', 'validation_detail', 'confluence_breakdown',
+        'order_description', 'order_type'
+    ]:
+        analysis.pop(key, None)
+    analysis['is_news_signal'] = True
     return analysis
 
-def apply_htf_trend_guard(analysis, symbol, htf_context):
-    if analysis.get('signal') not in ['BUY', 'SELL'] or not isinstance(htf_context, dict):
-        return analysis
-    trend = str(htf_context.get('trend') or '').upper()
-    bias = str(htf_context.get('bias') or '').upper()
-    if trend not in {'BULLISH', 'BEARISH'} and bias not in {'BULLISH', 'BEARISH'}:
-        return analysis
-    expected_bias = trend or bias
-    signal = analysis.get('signal')
-    if (signal == 'BUY' and expected_bias == 'BEARISH') or (signal == 'SELL' and expected_bias == 'BULLISH'):
-        analysis['confidence'] = 'MEDIUM' if analysis.get('confidence') == 'HIGH' else analysis.get('confidence')
-        analysis['confluence_score'] = min(analysis.get('confluence_score', 0), 78)
-        analysis['reasoning'] = f"{analysis.get('reasoning', '')} Note: the higher-timeframe trend is {expected_bias.lower()}, so this countertrend idea carries reduced conviction and needs strong structural confirmation."
-    return analysis
-
-def cross_check_ai_evidence(analysis):
-    ev = analysis.get('directional_evidence')
-    if not isinstance(ev, dict):
-        return analysis
-    bull = ev.get('bullish') or []
-    bear = ev.get('bearish') or []
-    if not isinstance(bull, list) or not isinstance(bear, list):
-        return analysis
-    signal = analysis.get('signal')
-    if signal == 'BUY' and len(bear) - len(bull) >= 2:
-        analysis['confidence'] = 'MEDIUM' if analysis.get('confidence') == 'HIGH' else analysis.get('confidence')
-        analysis['confluence_score'] = min(analysis.get('confluence_score', 0), 74)
-        analysis['reasoning'] = f"{analysis.get('reasoning', '')} Note: the AI's own evidence ledger was bearish-heavy, so bullish conviction was reduced."
-    elif signal == 'SELL' and len(bull) - len(bear) >= 2:
-        analysis['confidence'] = 'MEDIUM' if analysis.get('confidence') == 'HIGH' else analysis.get('confidence')
-        analysis['confluence_score'] = min(analysis.get('confluence_score', 0), 74)
-        analysis['reasoning'] = f"{analysis.get('reasoning', '')} Note: the AI's own evidence ledger was bullish-heavy, so bearish conviction was reduced."
-    return analysis
-
-def apply_direction_correction_guard(analysis, confluence, symbol):
-    signal = analysis.get('signal')
-    if signal not in ('BUY', 'SELL') or not confluence:
-        return analysis
-    direction = confluence.get('direction')
-    bull = confluence.get('bull_count', 0)
-    bear = confluence.get('bear_count', 0)
-    lead = abs(bull - bear)
-    if direction and direction != signal and max(bull, bear) >= 3 and lead >= 2:
-        analysis['signal'] = direction
-        analysis['confidence'] = 'MEDIUM'
-        analysis['confluence_score'] = max(MINIMUM_CONFLUENCE_SCORE, min(analysis.get('confluence_score', 0), 82))
-        ev = confluence.get('bullish_evidence') if direction == 'BUY' else confluence.get('bearish_evidence')
-        analysis['reasoning'] = f"{analysis.get('reasoning', '')} Direction corrected to {direction} by the structural evidence audit: {'; '.join(ev[:4])}."
-        analysis['rejection_reason'] = None
-    elif direction == signal:
-        ev = confluence.get('bullish_evidence') if signal == 'BUY' else confluence.get('bearish_evidence')
-        analysis['confluence_score'] = min(100, analysis.get('confluence_score', 0) + 2)
-        analysis['reasoning'] = f"{analysis.get('reasoning', '')} Directional evidence audit confirms the {signal} side: {'; '.join(ev[:4])}."
-    return analysis
-
-def apply_conservative_signal_filter(analysis, structural_context, candles, dxy_context, current_price, swings, symbol, pair_config=None):
-    signal = analysis.get('signal')
-    if signal not in ['BUY', 'SELL']:
-        return analysis
-    structural_score = (structural_context or {}).get('structural_score', 0)
-    reasoning = (analysis.get('reasoning') or '').lower()
-    recent_patterns = [c.get('pattern') for c in (candles or []) if c.get('pattern')]
-    strong_recent = any(pattern in {'STRONG_BULLISH', 'STRONG_BEARISH', 'HAMMER', 'INVERTED_HAMMER', 'REJECTION_LOW', 'REJECTION_HIGH'} for pattern in recent_patterns)
-    structural_markers = any(term in reasoning for term in ['order block', 'fvg', 'liquidity', 'retest', 'reclaim', 'zone', 'bos', 'choch', 'sweep'])
-    if current_price is not None and swings:
-        valid_swing_lows = [l for l in swings.get('recent_swing_lows', []) if l < current_price]
-        valid_swing_highs = [h for h in swings.get('recent_swing_highs', []) if h > current_price]
-    else:
-        valid_swing_lows = []
-        valid_swing_highs = []
-    has_clear_anchor = bool((signal == 'BUY' and valid_swing_lows) or (signal == 'SELL' and valid_swing_highs))
-    has_structure_support = structural_score >= 60 or strong_recent or structural_markers or (has_clear_anchor and structural_score >= 55)
-    if not has_structure_support:
-        analysis['confidence'] = 'LOW'
-        analysis['confluence_score'] = max(analysis.get('confluence_score', 0), MINIMUM_CONFLUENCE_SCORE)
-        analysis['rejection_reason'] = 'Structure is still forming, so the setup remains an early candidate rather than a hard no-trade.'
-    return analysis
-
-def build_display_reason(analysis, symbol, current_price=None, phase_context=None, structural_context=None, dxy_context=None):
-    reasoning = (analysis.get('reasoning') or '').strip()
-    rejection = (analysis.get('rejection_reason') or '').strip()
-    setup_context = analysis.get('setup_context') or {}
-    phase = (phase_context or {}).get('phase') or setup_context.get('phase') or analysis.get('market_state') or 'unknown'
-    setup_type = setup_context.get('setup_type') or analysis.get('market_state') or 'unknown'
-    timing = setup_context.get('entry_timing') or (phase_context or {}).get('entry_quality') or 'unknown'
-    signal = analysis.get('signal')
-    score = analysis.get('confluence_score')
-    confidence = analysis.get('confidence')
-    dxy_status = analysis.get('dxy_correlation') or ('CONFIRMING' if dxy_context else '')
-    entry = analysis.get('entry')
-    current = current_price if current_price is not None else entry
-    parts = []
-    if reasoning:
-        parts.append(reasoning)
-    if analysis.get('confluence_breakdown'):
-        parts.append(f"Confluence breakdown: {analysis.get('confluence_breakdown')}")
-    else:
-        breakdown_parts = []
-        dxy = analysis.get('dxy_correlation') or 'N/A'
-        micro = analysis.get('microstructure_read') or ''
-        rsi_ctx = analysis.get('rsi_context') or ''
-        struct_score = analysis.get('structural_score') if structural_context is None else structural_context.get('structural_score')
-        live_price = analysis.get('live_price') or current_price
-        if dxy:
-            breakdown_parts.append(f"DXY: {dxy}")
-        if micro:
-            breakdown_parts.append(f"VWAP/RVOL: {micro}")
-        if rsi_ctx:
-            breakdown_parts.append(f"RSI: {rsi_ctx}")
-        if struct_score is not None:
-            breakdown_parts.append(f"Structure score: {struct_score}/100")
-        if live_price is not None:
-            try:
-                breakdown_parts.append(f"Live price: {float(live_price):.2f}")
-            except Exception:
-                breakdown_parts.append(f"Live price: {live_price}")
-        if breakdown_parts:
-            parts.append('Confluence breakdown: ' + ' | '.join(breakdown_parts))
-        else:
-            parts.append(f"{symbol} is being assessed from the current market and execution context.")
-    if phase and phase != 'unknown':
-        parts.append(f"Market state is {phase}.")
-    if setup_type and setup_type != 'unknown':
-        parts.append(f"Setup type is {setup_type}.")
-    if timing and timing != 'unknown':
-        parts.append(f"Entry timing is {timing}.")
-    if current is not None and entry is not None and current not in [0, None]:
-        gap_pct = abs(entry - current) / current * 100 if current else 0.0
-        parts.append(f"The proposed entry is about {gap_pct:.2f}% from the live price.")
-    if dxy_status:
-        parts.append(f"DXY correlation is {dxy_status.lower()}.")
-    if score is not None:
-        parts.append(f"Confluence score is {score}/100 with {confidence.lower() if confidence else 'unknown'} confidence.")
-    if rejection and signal == 'WAIT':
-        parts.append(f"Decision: {rejection}")
-    elif rejection:
-        parts.append(f"Decision: {rejection}")
-    return ' '.join(parts)
-
-def build_validation_detail(analysis, swings, current_price, symbol, pair_config=None, structural_context=None):
-    signal = analysis.get('signal')
-    if signal not in ['BUY', 'SELL']:
-        return 'No trade signal was produced because the setup did not meet the required structural or risk criteria.'
-    pair_config = pair_config or {}
-    min_dist = current_price * pair_config.get('min_dist_pct', 0.001)
-    target_rr = pair_config.get('min_rr', pair_config.get('target_rr', 1.3))
-    entry = analysis.get('entry', current_price)
-    sl = analysis.get('stop_loss')
-    tp_list = analysis.get('take_profit', [])
-    tp1 = tp_list[0] if tp_list else None
-    reasons = []
-    if signal == 'BUY':
-        if sl is None or sl >= entry:
-            reasons.append(f'SL is not below entry ({sl} >= {entry}).')
-        else:
-            risk = entry - sl
-            if risk + 1e-6 < min_dist:
-                reasons.append(f'SL is too close to entry; risk is {risk:.4f}, below the minimum {min_dist:.4f} for {symbol}.')
-        if tp1 is None or tp1 <= entry:
-            reasons.append(f'TP is not above entry ({tp1} <= {entry}).')
-        else:
-            reward = tp1 - entry
-            risk = entry - sl if sl is not None else 0
-            if risk > 0 and (reward / risk) + 0.01 < target_rr:
-                reasons.append(f'The proposed risk/reward is too low ({reward / risk:.2f} vs required {target_rr:.2f}).')
-    else:
-        if sl is None or sl <= entry:
-            reasons.append(f'SL is not above entry ({sl} <= {entry}).')
-        else:
-            risk = sl - entry
-            if risk + 1e-6 < min_dist:
-                reasons.append(f'SL is too close to entry; risk is {risk:.4f}, below the minimum {min_dist:.4f} for {symbol}.')
-        if tp1 is None or tp1 >= entry:
-            reasons.append(f'TP is not below entry ({tp1} >= {entry}).')
-        else:
-            reward = entry - tp1
-            risk = sl - entry if sl is not None else 0
-            if risk > 0 and (reward / risk) + 0.01 < target_rr:
-                reasons.append(f'The proposed risk/reward is too low ({reward / risk:.2f} vs required {target_rr:.2f}).')
-    if structural_context and structural_context.get('structural_score', 0) < 70:
-        reasons.append('The structural score is too weak for a high-quality setup.')
-    return ' '.join(reasons) if reasons else 'The setup did not meet the structural and risk requirements for execution.'
-
-def get_live_market_snapshot(symbol, yf_symbol, fallback_df=None):
-    fallback_price = None
-    if fallback_df is not None and not fallback_df.empty:
-        fallback_price = float(fallback_df['Close'].iloc[-1])
-    price = fallback_price
-    return {'symbol': symbol, 'price': price, 'source': 'fallback'}
-
-def update_market_state(new_state):
-    if not new_state:
-        return
-    previous = st.session_state.get('market_state', 'coiling')
-    if previous != new_state:
-        st.session_state.state_history.append({'state': new_state, 'time': datetime.now().strftime('%H:%M:%S')})
-        if len(st.session_state.state_history) > 20:
-            st.session_state.state_history = st.session_state.state_history[-20:]
-        st.session_state.market_state = new_state
-
-def estimate_tokens_for_text(text):
-    return max(1, int(len(text) / 4))
-
-def estimate_analysis_tokens(system_prompt, user_content):
-    prompt_text = system_prompt + ' ' + ' '.join([item.get('text', '') for item in user_content if isinstance(item, dict)])
-    return estimate_tokens_for_text(prompt_text) + GEMINI_ESTIMATED_RESPONSE_TOKENS
-
-def reserve_gpt_tokens(estimated_tokens):
-    now = datetime.now()
-    window_start = st.session_state.gpt_token_window_start
-    if (now - window_start).total_seconds() >= 60:
-        st.session_state.gpt_token_window_start = now
-        st.session_state.gpt_tokens_used = 0
-    if estimated_tokens is None:
-        estimated_tokens = 0
-    if st.session_state.gpt_tokens_used + estimated_tokens > GEMINI_TOKEN_LIMIT_PER_MINUTE:
-        next_reset = st.session_state.gpt_token_window_start + timedelta(minutes=1)
-        st.session_state.gpt_rate_limit_until = next_reset
-        st.session_state.gpt_rate_limit_reason = f"Token budget exceeded: {st.session_state.gpt_tokens_used}/{GEMINI_TOKEN_LIMIT_PER_MINUTE} used. Needs {estimated_tokens} more tokens and resets at {next_reset.strftime('%H:%M:%S')}."
-        return False
-    st.session_state.gpt_rate_limit_reason = ''
-    # Don't add estimated tokens here, we will add ACTUAL tokens after the API call succeeds
-    return True
-
-def is_gpt_rate_limited():
-    retry_until = st.session_state.get('gpt_rate_limit_until')
-    return retry_until is not None and datetime.now() < retry_until
-
-def call_gpt(system_prompt, user_content, max_tokens=4000, retry_count=0, estimated_tokens=None, image_b64=None):
-    api_key = get_secret("GEMINI_API_KEY", "")
-    if not api_key:
-        print("❌ GEMINI_API_KEY is missing from st.secrets!")
-        return {"signal": "WAIT", "confluence_score": 0, "confidence": "LOW",
-                "rejection_reason": "Missing Gemini API Key.",
-                "model_used": "Gemini unavailable", "estimated_tokens": 0,
-                "api_status": "MISSING_KEY"}
-
-    if estimated_tokens is None:
-        estimated_tokens = estimate_analysis_tokens(system_prompt, user_content)
-
-    # Build user text
-    user_text = ""
-    for item in user_content:
-        if isinstance(item, dict) and item.get("type") == "text":
-            user_text += item.get("text", "") + "\n"
-        elif isinstance(item, str):
-            user_text += item + "\n"
-
-    # Build parts
-    parts = [{"text": f"SYSTEM INSTRUCTIONS:\n{system_prompt}\n\nUSER INPUT:\n{user_text}"}]
-
-    # Add image if provided (but compress to save tokens)
-    if image_b64:
-        # Only add image if it's under 500KB base64 (roughly 375KB original)
-        if len(image_b64) < 500000:
-            parts.append({
-                "inline_data": {
-                    "mime_type": "image/png",
-                    "data": image_b64
-                }
-            })
-            print(f"📸 Image attached ({len(image_b64)} chars base64)")
-        else:
-            print(f"⚠️ Image too large ({len(image_b64)} chars), skipping to save tokens")
-
-    headers = {"Content-Type": "application/json"}
-
-    for model in GEMINI_MODELS:
-        try:
-            # Rate limit checks
-            if is_gpt_rate_limited():
-                return {"signal": "WAIT", "confluence_score": 0, "confidence": "LOW",
-                        "rejection_reason": "RATE_LIMIT", "model_used": model,
-                        "estimated_tokens": estimated_tokens, "api_status": "RATE_LIMIT"}
-
-            time_since_last = (datetime.now() - st.session_state.last_gpt_request_time).total_seconds() if st.session_state.last_gpt_request_time else None
-            if time_since_last is not None and time_since_last < GEMINI_MIN_REQUEST_INTERVAL:
-                wait_time = int(GEMINI_MIN_REQUEST_INTERVAL - time_since_last)
-                st.session_state.gpt_rate_limit_until = datetime.now() + timedelta(seconds=wait_time)
-                return {"signal": "WAIT", "confluence_score": 0, "confidence": "LOW",
-                        "rejection_reason": "RATE_LIMIT", "model_used": model,
-                        "estimated_tokens": estimated_tokens, "api_status": "SPACING_LIMIT"}
-
-            if not reserve_gpt_tokens(estimated_tokens):
-                return {"signal": "WAIT", "confluence_score": 0, "confidence": "LOW",
-                        "rejection_reason": "RATE_LIMIT", "model_used": model,
-                        "estimated_tokens": estimated_tokens, "api_status": "TOKEN_BUDGET"}
-
-            # ── ATTEMPT 1: Native API WITH responseMimeType ──
-            payload = {
-                "contents": [{"role": "user", "parts": parts}],
-                "generationConfig": {
-                    "temperature": 0.2,
-                    "maxOutputTokens": max_tokens,
-                    "responseMimeType": "application/json"
-                }
-            }
-
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
-            print(f"🚀 Calling {model} via native API (with responseMimeType)...")
-
-            res = requests.post(url, headers=headers, json=payload, timeout=120)
-            st.session_state.last_gpt_request_time = datetime.now()
-
-            # If responseMimeType fails, try WITHOUT it
-            if res.status_code == 400 and "responseMimeType" in res.text:
-                print(f"⚠️ responseMimeType not supported, retrying without it...")
-                payload["generationConfig"].pop("responseMimeType", None)
-                res = requests.post(url, headers=headers, json=payload, timeout=120)
-
-            if res.status_code == 429:
-                retry_after = int(res.headers.get('Retry-After', '60')) if res.headers.get('Retry-After') else 60
-                st.session_state.gpt_rate_limit_until = datetime.now() + timedelta(seconds=retry_after)
-                print(f"⏳ 429 Rate limit. Retry after {retry_after}s")
-                return {"signal": "WAIT", "confluence_score": 0, "confidence": "LOW",
-                        "rejection_reason": "RATE_LIMIT", "model_used": model,
-                        "estimated_tokens": estimated_tokens, "api_status": "RATE_LIMIT_429"}
-
-            if res.status_code == 404:
-                print(f"❌ Model {model} returned 404. Trying next model...")
-                continue
-
-            if res.status_code != 200:
-                error_text = res.text[:500]
-                print(f"❌ API Error {res.status_code}: {error_text}")
-                # Try next model
-                continue
-
-            res_data = res.json()
-
-            # Extract token usage
-            usage = res_data.get("usageMetadata", {})
-            prompt_tokens = usage.get("promptTokenCount", 0)
-            completion_tokens = usage.get("candidatesTokenCount", 0)
-            total_tokens = usage.get("totalTokenCount", 0)
-
-            candidates = res_data.get("candidates", [])
-            if not candidates:
-                print(f"❌ No candidates in response: {str(res_data)[:300]}")
-                return {"signal": "WAIT", "confluence_score": 0, "confidence": "LOW",
-                        "rejection_reason": "No candidates returned",
-                        "model_used": model, "api_status": "NO_CANDIDATES",
-                        "total_tokens": total_tokens, "prompt_tokens": prompt_tokens,
-                        "completion_tokens": completion_tokens}
-
-            content = candidates[0].get("content", {}).get("parts", [{}])[0].get("text", "")
-            print(f"✅ Got response from {model} | Tokens: {total_tokens}")
-
-            # Clean markdown
-            content = re.sub(r'^```(?:json)?\s*', '', content, flags=re.IGNORECASE).strip()
-            content = re.sub(r'\s*```$', '', content).strip()
-
-            # Parse JSON
-            try:
-                cleaned = re.sub(r',\s*([}\]])', r'\1', content)
-                result = json.loads(cleaned)
-            except json.JSONDecodeError:
-                # Try extracting JSON substring
-                first = content.find('{')
-                last = content.rfind('}')
-                if first != -1 and last != -1 and last > first:
-                    substring = content[first:last+1]
-                    try:
-                        substring_clean = re.sub(r',\s*([}\]])', r'\1', substring)
-                        result = json.loads(substring_clean)
-                    except Exception:
-                        print(f"❌ JSON parse failed. Raw: {content[:200]}")
-                        return {"signal": "WAIT", "confluence_score": 0, "confidence": "LOW",
-                                "rejection_reason": "PARSE_ERROR",
-                                "raw_output": content[:500], "model_used": model,
-                                "api_status": "PARSE_ERROR",
-                                "total_tokens": total_tokens, "prompt_tokens": prompt_tokens,
-                                "completion_tokens": completion_tokens}
-                else:
-                    return {"signal": "WAIT", "confluence_score": 0, "confidence": "LOW",
-                            "rejection_reason": "PARSE_ERROR",
-                            "raw_output": content[:500], "model_used": model,
-                            "api_status": "PARSE_ERROR",
-                            "total_tokens": total_tokens}
-
-            result['model_used'] = model
-            result['estimated_tokens'] = estimated_tokens
-            result['total_tokens'] = total_tokens
-            result['prompt_tokens'] = prompt_tokens
-            result['completion_tokens'] = completion_tokens
-            result['api_status'] = 'SUCCESS'
-            return result
-
-        except requests.exceptions.Timeout:
-            print(f"⏰ Timeout calling {model}")
-            continue
-        except Exception as e:
-            print(f"❌ Exception calling {model}: {str(e)}")
-            if model == GEMINI_MODELS[-1]:
-                return {"signal": "WAIT", "confluence_score": 0, "confidence": "LOW",
-                        "rejection_reason": f"Error: {str(e)}", "model_used": "None",
-                        "api_status": "EXCEPTION", "estimated_tokens": estimated_tokens}
-            continue
-
-    return {"signal": "WAIT", "confluence_score": 0, "confidence": "LOW",
-            "rejection_reason": "Error: all Gemini models failed.",
-            "model_used": "None", "api_status": "ALL_MODELS_FAILED",
-            "estimated_tokens": estimated_tokens}
-
-def build_market_fallback_analysis(symbol, m10, swings, pair_config, dxy_context, candles=None, phase_context=None, live_price=None, htf_context=None, picture=None, firm=None, firm_notes=None, learning=None, historical_context=None):
-    if not st.session_state.get("_upgrade_fallback_warned"):
-        try:
-            add_notification("warning", "Gemini AI is unavailable (missing API key or rate-limited). Signals are coming from the Python fallback model. Verify GEMINI_API_KEY in Streamlit Secrets for full-quality institutional analysis.")
-        except Exception:
-            pass
-        st.session_state._upgrade_fallback_warned = True
-        
-    micro = calculate_microstructure(m10) or {}
-    regime = classify_market_regime(m10)
-    try:
-        current_price = float(live_price) if live_price is not None else float(m10["Close"].iloc[-1])
-    except Exception:
-        current_price = None
-        
-    if current_price is None:
-        return {
-            "bias": "RANGING", "signal": "WAIT", "confluence_score": 40, "confidence": "LOW",
-            "dxy_correlation": "NEUTRAL", "microstructure_read": "VWAP {} | RVOL {} | Momentum {} | ADX {}".format(
-                micro.get("price_vs_vwap", "NEUTRAL"), micro.get("rvol", 0), micro.get("momentum", "NEUTRAL"), regime.get("adx")),
-            "reasoning": "No trade: No reliable current price available.", "rejection_reason": "No reliable current price available.",
-            "structural_score": 40, "score_reason": "Upgraded model declined the setup.", "candidate_direction": None,
-            "levels_source": "PYTHON", "historical_pattern": historical_context or "", "api_status": "FALLBACK", "model_used": PYTHON_FALLBACK_MODEL
-        }
-        
-    order_blocks = detect_order_blocks(m10)
-    fvgs = detect_fvg(m10)
-    all_data_ref = st.session_state.get("cached_market_data", {}) or {}
-    vote = multi_strategy_vote(symbol, all_data_ref, m10, current_price, swings, order_blocks, fvgs)
-    htf_dir = htf_direction_gate(symbol, all_data_ref)
-    reversal = detect_reversal(m10)
-    direction = vote.get("direction")
-    
-    if direction is None:
-        return {
-            "bias": "RANGING", "signal": "WAIT", "confluence_score": 40, "confidence": "LOW",
-            "dxy_correlation": "NEUTRAL", "microstructure_read": "VWAP {} | RVOL {} | Momentum {} | ADX {}".format(
-                micro.get("price_vs_vwap", "NEUTRAL"), micro.get("rvol", 0), micro.get("momentum", "NEUTRAL"), regime.get("adx")),
-            "reasoning": "No trade: Multi-strategy confluence found no clean edge (buy={}, sell={}). Standing aside instead of guessing on momentum.".format(
-                vote.get("buy_strategies"), vote.get("sell_strategies")),
-            "rejection_reason": "Multi-strategy confluence found no clean edge.",
-            "structural_score": 40, "score_reason": "Upgraded model declined the setup.", "candidate_direction": None,
-            "levels_source": "PYTHON", "historical_pattern": historical_context or "", "api_status": "FALLBACK", "model_used": PYTHON_FALLBACK_MODEL
-        }
-        
-    if regime.get("regime") == "RANGING" and reversal is None:
-        return {
-            "bias": "RANGING", "signal": "WAIT", "confluence_score": 40, "confidence": "LOW",
-            "dxy_correlation": "NEUTRAL", "microstructure_read": "VWAP {} | RVOL {} | Momentum {} | ADX {}".format(
-                micro.get("price_vs_vwap", "NEUTRAL"), micro.get("rvol", 0), micro.get("momentum", "NEUTRAL"), regime.get("adx")),
-            "reasoning": "No trade: Market is ranging/choppy (ADX {}) with no reversal trigger. Momentum entries here have negative expectancy.".format(regime.get("adx")),
-            "rejection_reason": "Market is ranging/choppy with no reversal trigger.",
-            "structural_score": 40, "score_reason": "Upgraded model declined the setup.", "candidate_direction": None,
-            "levels_source": "PYTHON", "historical_pattern": historical_context or "", "api_status": "FALLBACK", "model_used": PYTHON_FALLBACK_MODEL
-        }
-        
-    if htf_dir and direction != htf_dir and reversal is None:
-        return {
-            "bias": "RANGING", "signal": "WAIT", "confluence_score": 40, "confidence": "LOW",
-            "dxy_correlation": "NEUTRAL", "microstructure_read": "VWAP {} | RVOL {} | Momentum {} | ADX {}".format(
-                micro.get("price_vs_vwap", "NEUTRAL"), micro.get("rvol", 0), micro.get("momentum", "NEUTRAL"), regime.get("adx")),
-            "reasoning": "No trade: Proposed {} is counter to the higher-timeframe {} trend with no reversal confirmation. Declining countertrend chop.".format(direction, htf_dir),
-            "rejection_reason": "Counter-trend without reversal confirmation.",
-            "structural_score": 40, "score_reason": "Upgraded model declined the setup.", "candidate_direction": None,
-            "levels_source": "PYTHON", "historical_pattern": historical_context or "", "api_status": "FALLBACK", "model_used": PYTHON_FALLBACK_MODEL
-        }
-        
-    lock = _desk_position_lock(symbol, direction, current_price)
-    if lock:
-        return {
-            "bias": "RANGING", "signal": "WAIT", "confluence_score": 40, "confidence": "LOW",
-            "dxy_correlation": "NEUTRAL", "microstructure_read": "VWAP {} | RVOL {} | Momentum {} | ADX {}".format(
-                micro.get("price_vs_vwap", "NEUTRAL"), micro.get("rvol", 0), micro.get("momentum", "NEUTRAL"), regime.get("adx")),
-            "reasoning": "No trade: " + lock, "rejection_reason": lock,
-            "structural_score": 40, "score_reason": "Upgraded model declined the setup.", "candidate_direction": None,
-            "levels_source": "PYTHON", "historical_pattern": historical_context or "", "api_status": "FALLBACK", "model_used": PYTHON_FALLBACK_MODEL
-        }
-        
-    bias = "BULLISH" if direction == "BUY" else "BEARISH"
-    supporting = vote.get("buy_strategies") if direction == "BUY" else vote.get("sell_strategies")
-    parts = []
-    parts.append("Upgraded desk model: {} via multi-strategy confluence ({}).".format(
-        direction, ", ".join(supporting) if supporting else "structure"))
-    parts.append("Regime {} (ADX {}).".format(regime.get("regime"), regime.get("adx")))
-    if htf_dir:
-        parts.append("Higher-timeframe trend is {} and aligned.".format(htf_dir))
-    if reversal:
-        parts.append("Reversal candle {} confirms zone rejection.".format(reversal.get("type")))
-    parts.append("Microstructure: VWAP {}, RVOL {}, momentum {}.".format(
-        micro.get("price_vs_vwap", "NEUTRAL"), micro.get("rvol", 0), micro.get("momentum", "NEUTRAL")))
-    if historical_context:
-        parts.append("Price context: {}".format(historical_context))
-        
-    return {
-        "bias": bias, "signal": normalize_ai_signal(direction), "confluence_score": 76, "confidence": "MEDIUM",
-        "dxy_correlation": "CONFIRMING" if dxy_context else "NEUTRAL",
-        "microstructure_read": "VWAP {} | RVOL {} | Momentum {} | ADX {}".format(
-            micro.get("price_vs_vwap", "NEUTRAL"), micro.get("rvol", 0), micro.get("momentum", "NEUTRAL"), regime.get("adx")),
-        "reasoning": " ".join(parts), "rejection_reason": None,
-        "structural_score": 72, "score_reason": "Upgraded regime + multi-strategy confluence model.",
-        "candidate_direction": direction, "levels_source": "PYTHON",
-        "historical_pattern": historical_context or "", "api_status": "FALLBACK", "model_used": PYTHON_FALLBACK_MODEL
-    }
-
-def build_market_analysis_prompt():
-    return """You are an elite institutional trading desk AI. You have FULL access to all data below including an attached chart screenshot. Use ALL concepts — miss nothing.
-
-DATA PROVIDED:
-{data_summary}
-MICROSTRUCTURE (M10):
-{microstructure_data}
-STRUCTURE CONTEXT:
-{structure_context}
-MARKET STRUCTURE ZONES:
-{market_structure_summary}
-MULTI-TIMEFRAME CONTEXT (10M/15M/30M/1H/4H):
-{multitimeframe_context}
-RSI VALUES (MULTI-TIMEFRAME):
-{rsi_values}
-RSI / DIVERGENCE CONTEXT:
-{rsi_context}
-PREMIUM/DISCOUNT POSITION:
-{premium_discount}
-VOLATILITY (ATR):
-{volatility_context}
-HTF CONTEXT (H1/H4):
-{htf_context}
-DXY (US Dollar Index) TREND:
-{dxy_data}
-HISTORICAL CONTEXT:
-{historical_context}
-STRUCTURAL SCORE (PYTHON):
-{structural_score_context}
-PYTHON DIRECTIONAL LEDGER:
-{directional_ledger}
-FIRM DESK BIAS (HTF-FIRST WITH HYSTERESIS):
-{firm_bias}
-MAX ENTRY DISTANCE FROM LIVE PRICE:
-{max_entry_distance}
-PYTHON CANDIDATE EXECUTION PLANS:
-{candidate_levels}
-
-MANDATORY RULES (ALL 22):
-1. Determine market state (continuation|reversal|exhaustion|trend|coiling) from ALL data.
-2. Think like a professional trader: weigh liquidity, flow, structure, volatility, RVOL, macro, execution quality.
-3. Prioritize early, price-near entries. Never chase a large impulse.
-4. Analyze RSI on every timeframe: overbought/oversold, regular and hidden divergences, confirmation vs contradiction.
-5. Use DXY as a core macro filter for XAUUSD, EURUSD, BTCUSD.
-6. Use VWAP, RVOL, and microstructure as execution inputs.
-7. Use full structure: BOS/CHOCH, order blocks, FVGs, liquidity sweeps, swing levels, support/resistance, candle behavior.
-8. Respect premium/discount: prefer buying in discount, selling in premium. Opposite zone = lower quality.
-9. If setup looks like exhaustion or trap, reduce confidence but STILL pick BUY or SELL.
-10. Select entry close to the live price within the stated MAX ENTRY DISTANCE.
-11. SL beyond clear invalidation. TP at next major liquidity zone. Minimum 1:1.5 R:R. Size stop using ATR.
-12. Reasoning MUST show how confluence was derived from DXY, RSI, VWAP, RVOL, structure, premium/discount, volatility, market phase.
-13. Write pair-specific, execution-focused reasoning (minimum 150 words). No generic filler.
-14. Always treat the live price as the primary reference.
-15. DIRECTIONAL PROTOCOL: (a) read H4/H1 trend; (b) locate price in premium/discount; (c) which liquidity side swept; (d) RSI divergences; (e) reversal/continuation candles; (f) hierarchy: HTF trend > sweep+divergence > premium/discount > VWAP/momentum. Signal MUST equal the winning side.
-16. Never equate prior impulse with trade direction. Fall into swept low being rejected = BUY reversal. Rally into swept high rejected = SELL reversal.
-17. Fill directional_evidence with separate bullish/bearish lists. Signal MUST match heavier list unless Rule 15 overrides (explain override).
-18. BE DECISIVE: You MUST output BUY or SELL. WAIT IS STRICTLY FORBIDDEN. If uncertain, follow the H4/H1 trend direction. Never abstain.
-19. DXY contradiction lowers confidence but does not flip a direction decided by Rule 15.
-20. INTERNAL CONSISTENCY: entry, stop_loss, take_profit numbers MUST match reasoning and order_description exactly.
-21. ENTRY PROXIMITY: entry MUST be within MAX ENTRY DISTANCE of live price. If AI chooses a level, it must be anchored to a visible structural level.
-22. CHART SCREENSHOT: If an image is provided, visually identify key support/resistance, liquidity pools, trendlines, and price action patterns. Use these visual levels for Entry/SL/TP. Describe what you see in visual_levels.
-
-ENTRY EXECUTION RULES:
-- Choose from PYTHON CANDIDATE EXECUTION PLANS when possible.
-- Modified levels must stay anchored to a swing, OB, FVG, session level, VWAP, premium/discount boundary, or liquidity pool.
-- Use ENTRY price for SL/TP math, not live price.
-- MARKET: entry ≈ live price. LIMIT: BUY LIMIT below / SELL LIMIT above. STOP: BUY STOP above / SELL STOP below.
-- SL beyond stop_anchor. TP respects tp_anchor.
-
-OUTPUT STRICT JSON ONLY (NO MARKDOWN, NO CODE FENCES):
-{{
-"market_state": "continuation|reversal|exhaustion|trend|coiling",
-"bias": "BULLISH|BEARISH|RANGING",
-"signal": "BUY|SELL",
-"confluence_score": 0,
-"confidence": "HIGH|MEDIUM|LOW",
-"dxy_correlation": "CONFIRMING|CONTRADICTING|NEUTRAL",
-"microstructure_read": "Brief VWAP/RVOL status and intrabar read",
-"directional_evidence": {{"bullish": ["item1","item2"], "bearish": ["item1","item2"]}},
-"visual_levels": "Describe key levels seen on the chart screenshot: support, resistance, liquidity pools, trendlines",
-"entry": 0.00,
-"stop_loss": 0.00,
-"take_profit": [0.00, 0.00],
-"rr_ratio": 0.00,
-"order_type": "MARKET|LIMIT|STOP",
-"entry_anchor": "demand zone / swing low / FVG / VWAP / session low",
-"stop_anchor": "swing low / OB low / FVG bottom / invalidation level",
-"tp_anchor": "swing high / supply zone / FVG top / session high",
-"order_expiry": "until next H1 close / until structure invalidates / GTC",
-"order_description": "Execution plan using SAME numbers as entry/stop_loss/take_profit.",
-"confluence_breakdown": "Weighting behind score: DXY, RSI, VWAP, RVOL, structure, premium/discount, market phase.",
-"reasoning": "Detailed institutional brief (min 150 words): HTF structure, manipulation reads, divergences, DXY, volatility, invalidation/target logic, chart visual analysis.",
-"rejection_reason": ""
-}}"""
-
-def analyze_symbol_premium(symbol, all_data, image_b64=None):
+def analyze_news_for_symbol(symbol, all_data, event):
     try:
         data = all_data.get(symbol, {})
         m10 = data.get('M10', pd.DataFrame())
         h1 = data.get('H1', pd.DataFrame())
         h4 = data.get('H4', pd.DataFrame())
-        live_snapshot = get_live_market_snapshot(symbol, YFINANCE_MAP.get(symbol, symbol), fallback_df=m10)
         if m10.empty:
-            return {"error": f"Failed to fetch market data for {symbol}. Yahoo Finance may be temporarily rate-limiting your IP. Please wait a few minutes and try again."}
-            
+            return {"error": f"Failed to fetch market data for {symbol}."}
+        
         micro = calculate_microstructure(m10)
-        current_price = live_snapshot.get('price') or float(m10['Close'].iloc[-1])
+        current_price = float(m10['Close'].iloc[-1])
         swings = find_swings(m10)
         pair_config = get_pair_config(symbol)
-        max_entry_distance = f"{pair_config.get('max_entry_points', 10)} points (HARD LIMIT for {symbol})"
         
         dxy_data = all_data.get('DXY', {}).get('H1', pd.DataFrame())
         dxy_summary = "DXY Data Unavailable"
@@ -2483,22 +1883,26 @@ def analyze_symbol_premium(symbol, all_data, image_b64=None):
             dxy_micro = calculate_microstructure(dxy_data)
             dxy_context = {'trend': dxy_micro['momentum'], 'price_vs_vwap': dxy_micro['price_vs_vwap']}
             dxy_summary = f"Current: {dxy_price} | VWAP Position: {dxy_micro['price_vs_vwap']} | Momentum: {dxy_micro['momentum']} | RVOL: {dxy_micro['rvol']}"
-            
+        
         htf_context = None
         if not h4.empty:
             h4_micro = calculate_microstructure(h4)
             htf_context = {'trend': h4_micro['momentum'], 'bias': h4_micro['momentum'], 'price_vs_vwap': h4_micro['price_vs_vwap']}
-            
+        
         picture = build_mtf_picture(all_data, symbol)
         firm = None
         firm_notes = []
         if picture:
             firm, firm_notes = resolve_firm_direction(symbol, picture)
-            
+        
+        news_payload = [{'event_time_utc': event.get('event_time_utc', datetime.now(timezone.utc) + timedelta(minutes=max(0, event.get('minutes_until', 0)))), 'within_2h': event.get('within_2h', False), 'time': event.get('time', ''), 'currency': event.get('currency', ''), 'event': event.get('event', '')}]
+        nc = build_news_context(news_payload, reference_dt=datetime.now(timezone.utc))
+        news_text = format_news_summary(news_payload, limit=len(news_payload))
+        news_context = {'within_2h': nc.get('within_2h', False), 'bias': nc.get('bias', 'neutral'), 'upcoming_count': nc.get('upcoming_count', 0), 'next_event': nc.get('next_event'), 'pre_news_bias': nc.get('pre_news_bias', 'No imminent high-impact event.')}
+        
         phase_context = detect_market_phase(m10, swings=swings)
-        setup_context = build_setup_context(m10, swings, current_price, symbol, dxy_context=dxy_context)
-        structural_context = calculate_structural_score(m10, symbol, dxy_context=dxy_context, phase_context=phase_context)
-        candles = analyze_candle_structure(m10)
+        setup_context = build_setup_context(m10, swings, current_price, symbol, dxy_context=dxy_context, news_context=news_context)
+        structural_context = calculate_structural_score(m10, symbol, dxy_context=dxy_context, news_context=news_context, phase_context=phase_context)
         
         bos, choch = detect_bos_choch(m10)
         order_blocks = detect_order_blocks(m10)
@@ -2506,11 +1910,14 @@ def analyze_symbol_premium(symbol, all_data, image_b64=None):
         sweeps = detect_liquidity_sweeps(m10)
         
         structure_parts = []
-        if bos or choch: structure_parts.append(f"BOS/CHOCH: {bos or choch}")
-        if order_blocks: structure_parts.append("Order blocks: " + ", ".join([f"{ob['type']}@{ob['price']:.2f}" for ob in order_blocks]))
-        if fvgs: structure_parts.append("FVGs: " + ", ".join([f"{fvg['type']}({fvg['top']:.2f}->{fvg['bottom']:.2f})" for fvg in fvgs]))
-        if sweeps: structure_parts.append("Sweeps: " + ", ".join([f"{s['type']}@{s['price']:.2f}" for s in sweeps]))
-        if candles: structure_parts.append("Recent candles: " + "; ".join([f"{c['time'].strftime('%H:%M')} {c['pattern']} ({c['candle_type']})" for c in candles]))
+        if bos or choch:
+            structure_parts.append(f"BOS/CHOCH: {bos or choch}")
+        if order_blocks:
+            structure_parts.append("Order blocks: " + ", ".join([f"{ob['type']}@{ob['price']:.2f}" for ob in order_blocks]))
+        if fvgs:
+            structure_parts.append("FVGs: " + ", ".join([f"{fvg['type']}({fvg['top']:.2f}->{fvg['bottom']:.2f})" for fvg in fvgs]))
+        if sweeps:
+            structure_parts.append("Sweeps: " + ", ".join([f"{s['type']}@{s['price']:.2f}" for s in sweeps]))
         structure_context = " | ".join(structure_parts) if structure_parts else "No strong structural clues detected."
         
         market_structure_summary = build_market_structure_summary(m10, current_price=current_price, swings=swings, order_blocks=order_blocks, fvgs=fvgs, sweeps=sweeps, bos=bos, choch=choch, symbol=symbol)
@@ -2522,265 +1929,347 @@ def analyze_symbol_premium(symbol, all_data, image_b64=None):
         ledger = detect_directional_confluence(m10, swings=swings, htf_context=htf_context, dxy_context=dxy_context, symbol=symbol)
         directional_ledger = f"Bullish ({ledger['bull_count']}): {'; '.join(ledger['bullish_evidence']) or 'none'} | Bearish ({ledger['bear_count']}): {'; '.join(ledger['bearish_evidence']) or 'none'} | Ledger direction: {ledger['direction'] or 'none'}"
         
-        rsi_context = ''
-        if not m10.empty:
-            divergence = detect_rsi_divergence(m10)
-            rsi_context = f"M10 RSI context: {divergence['type']} - {divergence['reason']}" if divergence else 'M10 RSI context: no clear divergence detected.'
-            
-        m15_data = data.get('M15', pd.DataFrame())
-        m30_data = data.get('M30', pd.DataFrame())
-        for label, frame in [('M15', m15_data), ('M30', m30_data), ('H1', h1)]:
-            if frame is not None and not getattr(frame, 'empty', True):
-                d = detect_rsi_divergence(frame)
-                if d:
-                    rsi_context += f" | {label} RSI context: {d['type']} - {d['reason']}"
-        if not rsi_context:
-            rsi_context = 'RSI context unavailable.'
-            
         h1_summary = f"Latest H1 close: {h1['Close'].iloc[-1]:.2f}" if not h1.empty else "H1 data unavailable"
         h4_summary = f"Latest H4 close: {h4['Close'].iloc[-1]:.2f}" if not h4.empty else "H4 data unavailable"
         htf_summary = f"H1: {h1_summary} | H4: {h4_summary}"
         
-        prompt_data = f"Symbol: {symbol} | Live Price: {current_price} | Swing Highs: {swings['recent_swing_highs']} | Swing Lows: {swings['recent_swing_lows']} | Market Phase: {phase_context['phase']} | Phase Reason: {phase_context['reason']} | Setup Type: {setup_context['setup_type']} | Entry Timing: {setup_context['entry_timing']} | Entry Quality: {phase_context['entry_quality']} | Entry Rule: use a price-near entry and do not chase a distant level."
+        prompt_data = f"Symbol: {symbol} | Live Price: {current_price} | Swing Highs: {swings['recent_swing_highs']} | Swing Lows: {swings['recent_swing_lows']} | Market Phase: {phase_context['phase']} | Phase Reason: {phase_context['reason']} | Setup Type: {setup_context['setup_type']} | Entry Timing: {setup_context['entry_timing']} | Entry Quality: {phase_context['entry_quality']}"
         prompt_micro = f"VWAP: {micro.get('vwap', 'N/A')} | Price vs VWAP: {micro.get('price_vs_vwap', 'N/A')} | RVOL: {micro.get('rvol', 'N/A')} ({micro.get('volume_anomaly', 'N/A')})"
         structural_score_context = f"Python structural score: {structural_context['structural_score']}/100 | Basis: {structural_context['score_reason']}"
-        historical_context = build_historical_context(m10)
+        
+        historical_context = fetch_news_historical_context(event)
+        if not historical_context:
+            historical_context = build_historical_context(m10)
+        
         firm_bias_text = f"{firm} (standing desk bias; weighted MTF evidence {picture.get('score', 0):+.1f})" if firm else "NONE - evidence tied; stand aside unless a clear edge emerges."
-        candidate_levels = build_candidate_levels(symbol, current_price, swings, order_blocks, fvgs, setup_context.get('atr'), pair_config)
+        
+        news_summary = f"Event: {event['event']} | Currency: {event['currency']} | Time: {event['time']} | Impact: {event['impact']} | Minutes Until: {event['minutes_until']}"
         
         all_format_kwargs = {
-            'data_summary': prompt_data, 'microstructure_data': prompt_micro, 'structure_context': structure_context,
-            'market_structure_summary': market_structure_summary, 'multitimeframe_context': multitimeframe_context,
-            'rsi_values': rsi_values, 'rsi_context': rsi_context, 'premium_discount': premium_discount,
-            'volatility_context': volatility_context, 'htf_context': htf_summary, 'dxy_data': dxy_summary,
-            'historical_context': historical_context, 'structural_score_context': structural_score_context,
-            'directional_ledger': directional_ledger, 'firm_bias': firm_bias_text,
-            'max_entry_distance': max_entry_distance, 'candidate_levels': json.dumps(candidate_levels, indent=2, default=str),
+            'data_summary': prompt_data,
+            'microstructure_data': prompt_micro,
+            'structure_context': structure_context,
+            'rsi_values': rsi_values,
+            'premium_discount': premium_discount,
+            'volatility_context': volatility_context,
+            'htf_context': htf_summary,
+            'dxy_data': dxy_summary,
+            'historical_context': historical_context,
+            'news_summary': news_summary,
+            'structural_score_context': structural_score_context,
+            'directional_ledger': directional_ledger,
         }
         
+        prompt_template = build_news_analysis_prompt()
         try:
-            prompt_text = build_market_analysis_prompt().format(**all_format_kwargs)
+            prompt_text = prompt_template.format(**all_format_kwargs)
         except KeyError as exc:
             missing_key = str(exc).strip("'")
-            prompt_text = build_market_analysis_prompt().format(**{**all_format_kwargs, missing_key: f"[missing:{missing_key}]"})
-            
+            prompt_text = prompt_template.format(**{**all_format_kwargs, missing_key: f"[missing:{missing_key}]"})
+        
         user_content = [{"type": "text", "text": prompt_text}]
-        estimated_tokens = estimate_analysis_tokens(build_market_analysis_prompt(), user_content)
+        estimated_tokens = estimate_analysis_tokens(prompt_template, user_content)
         
-        # 🚀 CALL AI FIRST
-        analysis = call_gpt(build_market_analysis_prompt(), user_content, max_tokens=2000, estimated_tokens=estimated_tokens, image_b64=image_b64)
+        analysis = call_groq(prompt_template, user_content, max_tokens=GROQ_MAX_OUTPUT_TOKENS, estimated_tokens=estimated_tokens)
         
-        _post_ai_snapshot = get_live_market_snapshot(symbol, YFINANCE_MAP.get(symbol, symbol), fallback_df=m10)
-        if _post_ai_snapshot.get("price"):
-            current_price = _post_ai_snapshot.get("price")
-            
         analysis = normalize_analysis_signals(analysis)
         analysis.setdefault('model_used', PYTHON_FALLBACK_MODEL)
         analysis.setdefault('microstructure_read', prompt_micro)
-        analysis.setdefault('rsi_context', rsi_context)
-        analysis.setdefault('dxy_summary', dxy_summary)
         analysis.setdefault('live_price', current_price)
         analysis['setup_context'] = setup_context
-        analysis['market_state'] = analysis.get('market_state') or setup_context['setup_type']
-        update_market_state(analysis.get('market_state') or setup_context['setup_type'])
-        
-        # 🚨 STRICT FALLBACK TRIGGER: Only fallback if API completely failed
-        if analysis.get('api_status') not in ['SUCCESS', 'SUCCESS_EXTRACTED']:
-            gemini_failure = analysis.get('rejection_reason', 'Unknown API Error')
-            analysis = build_market_fallback_analysis(symbol, m10, swings, pair_config, dxy_context, candles=candles, phase_context=phase_context, live_price=current_price, htf_context=htf_context, picture=picture, firm=firm, firm_notes=firm_notes, learning=None, historical_context=historical_context)
-            analysis = normalize_analysis_signals(analysis)
-            analysis['gemini_failure'] = gemini_failure
-            analysis['estimated_tokens'] = analysis.get('estimated_tokens', estimated_tokens)
-            
-        # 🚨 FORCE BUY/SELL (No WAIT allowed from AI)
-        if analysis.get('signal') == 'WAIT':
-            firm_norm = normalize_ai_signal(firm) if firm else None
-            if firm_norm:
-                analysis['signal'] = firm_norm
-                analysis['reasoning'] = (analysis.get('reasoning') or '') + f" (AI attempted to WAIT, forced to {firm_norm} based on standing desk bias)."
-            else:
-                analysis['signal'] = 'BUY' if micro.get('momentum') == 'BULLISH' else 'SELL'
-                analysis['reasoning'] = (analysis.get('reasoning') or '') + f" (AI attempted to WAIT, forced to {analysis['signal']} based on microstructure momentum)."
-            analysis['confidence'] = 'LOW'
-            
-        if setup_context['setup_type'] == 'exhaustion':
-            analysis['signal'] = 'WAIT'
-            analysis['confidence'] = 'LOW'
-            analysis['confluence_score'] = min(analysis.get('confluence_score', 0), MINIMUM_CONFLUENCE_SCORE)
-            analysis['rejection_reason'] = 'Exhaustion is already visible, so the market is too extended to justify forcing a fresh trade into the move.'
-            
-        if setup_context['entry_timing'] == 'late':
-            analysis['signal'] = 'WAIT'
-            analysis['confidence'] = 'LOW'
-            analysis['confluence_score'] = min(analysis.get('confluence_score', 0), MINIMUM_CONFLUENCE_SCORE)
-            analysis['rejection_reason'] = 'The entry is already late, the move is in progress, and the structure is no longer offering a clean early re-entry opportunity.'
-            
-        analysis = apply_htf_trend_guard(analysis, symbol, htf_context)
-        
-        ai_score = int(round(analysis.get('confluence_score', 0)))
-        analysis['confluence_score'] = min(100, max(0, ai_score))
-        if analysis.get('confidence') == 'LOW' and analysis['confluence_score'] >= 75:
-            analysis['confidence'] = 'MEDIUM'
-        elif analysis.get('confidence') == 'MEDIUM' and analysis['confluence_score'] >= 85:
-            analysis['confidence'] = 'HIGH'
-            
         analysis['structural_score'] = structural_context['structural_score']
         analysis['atr'] = setup_context.get('atr')
         analysis['score_reason'] = structural_context['score_reason']
         analysis['candidate_direction'] = structural_context['candidate_direction']
+        analysis['is_news_signal'] = True
         
-        analysis = apply_dxy_guardrails(analysis, symbol, dxy_context)
-        analysis = cross_check_ai_evidence(analysis)
-        analysis = apply_direction_correction_guard(analysis, ledger, symbol)
-        analysis = cross_check_ai_evidence(analysis)
+        if analysis.get('api_status') not in ['SUCCESS', 'SUCCESS_EXTRACTED']:
+            groq_failure = analysis.get('rejection_reason', 'Unknown API Error')
+            groq_status = analysis.get('api_status', 'UNKNOWN')
+            groq_model = analysis.get('model_used', 'None')
+            groq_raw_output = analysis.get('raw_output', '')
+            groq_tokens = {
+                key: analysis.get(key, 0)
+                for key in ('total_tokens', 'prompt_tokens', 'completion_tokens')
+            }
+            analysis = build_pre_news_fallback_analysis(symbol, m10, swings, pair_config, dxy_context, news_context, phase_context=phase_context, live_price=current_price, htf_context=htf_context, picture=picture, firm=firm, firm_notes=firm_notes, historical_context=historical_context)
+            analysis = normalize_analysis_signals(analysis)
+            analysis['groq_failure'] = groq_failure
+            analysis['groq_api_status'] = groq_status
+            analysis['groq_model'] = groq_model
+            analysis.update(groq_tokens)
+            if groq_raw_output:
+                analysis['groq_raw_output'] = groq_raw_output
+            analysis['estimated_tokens'] = analysis.get('estimated_tokens', estimated_tokens)
         
-        firm_norm = normalize_ai_signal(firm) if firm else None
-        if firm_norm and analysis.get('signal') in ('BUY', 'SELL') and analysis['signal'] != firm_norm:
-            ev = analysis.get('directional_evidence') or {}
-            counter = len(ev.get('bullish', [])) if firm_norm == 'BUY' else len(ev.get('bearish', []))
-            if counter >= 3:
-                analysis['reasoning'] = (analysis.get('reasoning') or '') + f" (AI overrode the standing {firm_norm} desk bias with {counter} counter-evidences.)"
-            else:
-                analysis['signal'] = firm_norm
-                analysis['reasoning'] = (analysis.get('reasoning') or '') + f" The standing {firm_norm} desk bias is maintained; the AI view was aligned to the desk bias."
-                
-        analysis = apply_conservative_signal_filter(analysis, structural_context, candles, dxy_context, current_price, swings, symbol, pair_config=pair_config)
-        
-        analysis = finalize_trade_plan(
-            analysis=analysis, symbol=symbol, current_price=current_price, swings=swings,
-            order_blocks=order_blocks, fvgs=fvgs, atr=setup_context.get('atr'), pair_config=pair_config
-        )
-        
-        if analysis.get('signal') in ('BUY', 'SELL') and analysis.get('take_profit'):
-            final_note = f"Final levels: Entry {analysis['entry']} | SL {analysis['stop_loss']} | TP {analysis['take_profit'][0]}."
-            analysis['order_description'] = f"{final_note} {analysis.get('order_description') or ''}".strip()
-            
-        analysis['validation_detail'] = build_validation_detail(analysis, swings, current_price, symbol, pair_config=pair_config, structural_context=structural_context)
-        analysis['display_reasoning'] = build_display_reason(analysis, symbol, current_price=current_price, phase_context=phase_context, structural_context=structural_context, dxy_context=dxy_context)
         analysis['symbol'] = symbol
-        analysis = normalize_analysis_signals(analysis)
         analysis['timestamp'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        return analysis
+        analysis['news_event'] = event.get('event', '')
+        analysis['news_time'] = event.get('time', '')
+        analysis['news_event_id'] = event.get('event_id')
+        analysis = normalize_analysis_signals(analysis)
         
+        return analysis
     except Exception as e:
-        return {"error": str(e), "api_status": "PYTHON_EXCEPTION"}
+        return {"error": str(e)}
+
+def build_pre_news_fallback_analysis(symbol, m10, swings, pair_config, dxy_context, news_context, phase_context=None, live_price=None, htf_context=None, picture=None, firm=None, firm_notes=None, historical_context=None):
+    micro = calculate_microstructure(m10) or {}
+    all_data_ref = st.session_state.get("cached_market_data", {}) or {}
+    htf_dir = None
+    if htf_context:
+        htf_dir = htf_context.get('trend') or htf_context.get('bias')
+    
+    nxt = (news_context or {}).get("next_event") or {}
+    news_hist = fetch_news_historical_context(nxt) if isinstance(nxt, dict) else None
+    usd_thesis = None
+    if news_hist:
+        low = news_hist.lower()
+        if "weaker usd" in low:
+            usd_thesis = "WEAKER_USD"
+        elif "stronger usd" in low:
+            usd_thesis = "STRONGER_USD"
+    
+    direction = None
+    if usd_thesis == "STRONGER_USD":
+        direction = "SELL" if symbol in ("XAUUSD", "EURUSD", "BTCUSD") else "BUY"
+    elif usd_thesis == "WEAKER_USD":
+        direction = "BUY" if symbol in ("XAUUSD", "EURUSD", "BTCUSD") else "SELL"
+    else:
+        direction = htf_dir
+    
+    if direction not in ("BUY", "SELL"):
+        direction = htf_dir or ("BUY" if micro.get("momentum") == "BULLISH" else "SELL")
+    
+    confidence = "MEDIUM" if (htf_dir == direction or usd_thesis) else "LOW"
+    bias = "BULLISH" if direction == "BUY" else "BEARISH"
+    
+    reasoning = "Pre-news directional read for {} (fallback, AI unavailable). ".format(symbol)
+    reasoning += "Curated/FRED event impact: {}. ".format(news_hist or "no structured historical impact available")
+    reasoning += "HTF trend: {}. ".format(htf_dir or "neutral")
+    reasoning += "Direction set to {} from the USD thesis and higher-timeframe alignment. ".format(direction)
+    reasoning += "Direction-only guidance; execution levels withheld until live AI analysis."
+    
+    return {
+        "bias": bias,
+        "signal": normalize_ai_signal(direction),
+        "confluence_score": 72 if confidence == "MEDIUM" else 62,
+        "confidence": confidence,
+        "dxy_correlation": "CONFIRMING" if dxy_context else "NEUTRAL",
+        "microstructure_read": "VWAP {} | RVOL {}".format(micro.get("price_vs_vwap", "NEUTRAL"), micro.get("rvol", 0)),
+        "pre_news_bias": (news_context or {}).get("pre_news_bias", "News-driven reaction expected"),
+        "reasoning": reasoning,
+        "rejection_reason": None,
+        "structural_score": 70,
+        "score_reason": "Upgraded news fallback (USD thesis + HTF + FRED).",
+        "candidate_direction": direction,
+        "levels_source": "PYTHON",
+        "historical_pattern": news_hist or (historical_context or ""),
+        "api_status": "FALLBACK",
+        "model_used": PYTHON_FALLBACK_MODEL
+    }
+
+def run_news_analysis_cycle(news_events, all_data, symbols):
+    results_by_event = {}
+    for event in news_events:
+        eid = event.get('event_id') or f"{event.get('event')}|{event.get('currency')}|{event.get('time')}"
+        if st.session_state.news_results.get(eid) or st.session_state.news_signal_sent.get(eid):
+            update_news_event_status(event, 'sent', 'Already analyzed; skipping repeat AI run to save tokens.')
+            continue
+        
+        update_news_event_status(event, 'analyzing', 'AI pre-news impact analysis in progress...')
+        results = {}
+        for symbol in symbols:
+            if st.session_state.last_groq_request_time:
+                delta = (datetime.now() - st.session_state.last_groq_request_time).total_seconds()
+                if delta < GROQ_MIN_REQUEST_INTERVAL:
+                    time.sleep(GROQ_MIN_REQUEST_INTERVAL - delta)
+            
+            analysis = analyze_news_for_symbol(symbol, all_data, event)
+            if not isinstance(analysis, dict):
+                results[symbol] = {'signal': 'SKIPPED', 'reason': 'invalid result'}
+                continue
+            if 'error' in analysis:
+                results[symbol] = {'signal': 'SKIPPED', 'reason': analysis.get('error')}
+                continue
+            if analysis.get('rejection_reason') == 'RATE_LIMIT':
+                results[symbol] = {'signal': 'SKIPPED', 'reason': 'Groq rate limit'}
+                continue
+            results[symbol] = sanitize_news_event_analysis(analysis)
+        
+        st.session_state.news_results[eid] = {
+            'event': event,
+            'results': results,
+            'analyzed_at': datetime.now()
+        }
+        
+        valid = {s: a for s, a in results.items() if a.get('signal') in ('BUY', 'SELL', 'WAIT')}
+        if not valid:
+            update_news_event_status(event, 'waiting', 'Pre-news analysis failed (rate limit); retry next manual run.')
+            continue
+        
+        st.session_state.news_signal_sent[eid] = {
+            'summary_sent': False,
+            'symbols': list(valid),
+            'analysis_completed': True,
+            'completed_at': datetime.now()
+        }
+        update_news_event_status(event, 'sent', 'Pre-news analysis completed; will not re-analyze.')
+        
+        message = build_news_event_telegram(event, results, datetime.now(timezone.utc))
+        telegram_ok = send_telegram_message(message)
+        if telegram_ok:
+            st.session_state.news_signal_sent[eid]['summary_sent'] = True
+            update_news_event_status(event, 'sent', 'Pre-news impact signal sent to Telegram (once).')
+        else:
+            update_news_event_status(event, 'sent', 'Pre-news analysis completed; Telegram delivery failed/not configured, but AI will not repeat.')
+        
+        results_by_event[eid] = results
+    
+    return results_by_event
 
 # ── UI Layout ──────────────────────────────────────────────────────────────
-st.title("📊 Der-AI | Institutional Market Analysis")
-st.markdown("**Multi-Timeframe Structure | SMC | DXY Correlation | Multimodal Chart Analysis**")
+st.title("📰 Der-AI | High-Impact News Analysis")
+st.markdown("**5-Layer Systematic Analysis | FRED Historical Data | Groq AI Engine | Telegram Bridge**")
 
-tab1, tab2, tab3, tab4 = st.tabs(["📊 Market Analysis", "📜 Signal History", "🔔 Notifications", "⚙️ Settings"])
+tab1, tab2, tab3, tab4, tab5 = st.tabs(["📰 Fetch News", "🧠 Analyse News", "📜 Signal History", "🔔 Notifications", "⚙️ Settings"])
 
 with tab1:
-    st.header("🚀 Run AI Market Analysis")
-    selected_symbols = st.multiselect("Select Symbols to Analyse", SYMBOLS, default=['XAUUSD', 'EURUSD', 'BTCUSD'])
-    uploaded_file = st.file_uploader("📸 Attach Market Chart Screenshot (Optional - AI will analyze price action)", type=["png", "jpg", "jpeg"])
+    st.header("📅 Fetch High-Impact News")
+    st.markdown("Click the button below to fetch the latest high-impact USD-sensitive economic events for the week.")
     
-    image_b64 = None
-    if uploaded_file is not None:
-        image_b64 = base64.b64encode(uploaded_file.read()).decode("utf-8")
-        st.image(uploaded_file, caption="Uploaded Chart Snapshot", width=400)
-
-    if st.button("🧠 Analyse Market Now", type="primary"):
-        if not get_secret("GEMINI_API_KEY"):
-            st.error("⚠️ Please set your GEMINI_API_KEY in Streamlit Secrets.")
-        else:
-            with st.spinner("Fetching market data and running institutional analysis..."):
-                all_data = fetch_all_data()
-                st.session_state.cached_market_data = all_data
-                
-                for symbol in selected_symbols:
-                    st.info(f"Analysing {symbol}...")
-                    result = analyze_symbol_premium(symbol, all_data, image_b64=image_b64)
-                    
-                    if 'error' in result:
-                        st.error(f"❌ {symbol}: {result['error']}")
-                        add_notification('warning', f"❌ {symbol}: {result['error']}", symbol=symbol)
-                    else:
-                        # 🚨 DEBUGGING UI: Show API Status and Tokens
-                        api_status = result.get('api_status', 'UNKNOWN')
-                        model_used = result.get('model_used', 'Unknown')
-                        total_tokens = result.get('total_tokens', 0)
-                        prompt_tokens = result.get('prompt_tokens', 0)
-                        completion_tokens = result.get('completion_tokens', 0)
-                        rejection = result.get('rejection_reason', '')
-                        
-                        status_color = "green" if api_status in ['SUCCESS', 'SUCCESS_EXTRACTED', 'FALLBACK'] else "red"
-                        st.markdown(f"**🤖 AI Model:** `{model_used}` | **🔋 Tokens Used:** `{total_tokens}` (Prompt: {prompt_tokens}, Completion: {completion_tokens}) | **📡 Status:** <span style='color:{status_color}; font-weight:bold;'>{api_status}</span>", unsafe_allow_html=True)
-                        
-                        if api_status not in ['SUCCESS', 'SUCCESS_EXTRACTED', 'FALLBACK']:
-                            with st.expander("🐛 Debug AI Response (Why it failed)"):
-                                st.code(result.get('raw_output', 'No raw output captured.'), language='json')
-                                st.error(f"Rejection Reason: {result.get('rejection_reason', 'Unknown')}")
-                        
-                        is_valid_logic, logic_reason = validate_ai_logic(result)
-                        if not is_valid_logic:
-                            st.info(f"⚪ {symbol}: Signal Rejected. AI Logic Flaw: {logic_reason}")
-                            add_notification('warning', f"⚪ {symbol}: Signal Rejected. AI Logic Flaw: {logic_reason}", symbol=symbol, signal=result.get('signal'))
-                            continue
-                        
-                        if result.get('signal') == 'WAIT':
-                            ai_reason = result.get('display_reasoning') or result.get('reasoning') or result.get('rejection_reason', 'Market conditions do not meet high-confidence criteria.')
-                            st.info(f"⚪ {symbol}: No Trade (WAIT). AI Reason: {ai_reason}")
-                            add_notification('info', f"⚪ {symbol}: No Trade (WAIT). AI Reason: {ai_reason}", symbol=symbol, signal='WAIT', score=result.get('confluence_score'))
-                            continue
-                        
-                        pair_config = get_pair_config(symbol)
-                        is_valid_math, math_reason = validate_signal_math(result, pair_config=pair_config)
-                        if not is_valid_math:
-                            st.info(f"⚪ {symbol}: Signal Rejected. AI Reason: {math_reason}")
-                            add_notification('warning', f"⚪ {symbol}: Signal Rejected. AI Reason: {math_reason}", symbol=symbol, signal=result.get('signal'))
-                            continue
-                        
-                        combined_score = result.get('confluence_score', 0)
-                        if combined_score >= MINIMUM_CONFLUENCE_SCORE and result.get('confidence') in ['HIGH', 'MEDIUM', 'LOW']:
-                            sig_color = "🟢" if result.get('signal') == "BUY" else "🔴"
-                            st.markdown(f"### {sig_color} **NEW SIGNAL:** {result.get('symbol', symbol)} - {result.get('signal')}")
-                            st.write(f"**DXY Correlation:** {result.get('dxy_correlation', 'N/A')}")
-                            st.write(f"**Microstructure:** {result.get('microstructure_read', 'N/A')}")
-                            st.write(f"**Visual Levels (Chart):** {result.get('visual_levels', 'N/A')}")
-                            st.info(f"**Entry:** {result.get('entry')} | **SL:** {result.get('stop_loss')} | **TP:** {result.get('take_profit')}")
-                            if result.get('order_type'):
-                                st.write(f"**Order Type:** {result.get('order_type')}")
-                            if result.get('order_description'):
-                                st.write(f"**Execution Plan:** {result.get('order_description')}")
-                            st.write(f"**Reasoning:** {result.get('reasoning')}")
-                            st.markdown("---")
-                            
-                            st.session_state.active_signals[symbol] = {'direction': result.get('signal'), 'entry': result.get('entry', 0), 'timestamp': datetime.now(), 'score': combined_score}
-                            result['analyzed_at'] = datetime.now()
-                            st.session_state.signal_history.append(result)
-                            
-                            msg = build_telegram_signal_message(symbol, result)
-                            if send_telegram_message(msg):
-                                st.success("✅ Signal sent to Telegram!")
-                            add_notification('success', f"✅ {symbol}: New {result.get('signal')} signal accepted via {result.get('model_used', PYTHON_FALLBACK_MODEL)}. Score: {combined_score}/100. Entry: {result.get('entry')} | SL: {result.get('stop_loss')} | TP: {result.get('take_profit', ['N/A'])[0] if result.get('take_profit') else 'N/A'}.", symbol=symbol, signal=result.get('signal'), score=combined_score)
-                        else:
-                            ai_reason = result.get('display_reasoning') or result.get('reasoning') or result.get('rejection_reason', 'Low confidence or DXY contradiction')
-                            st.info(f"⚪ {symbol}: Signal Rejected. Score: {result.get('confluence_score', 0)}/100, Confidence: {result.get('confidence', 'N/A')}. AI Reason: {ai_reason}")
-                            add_notification('warning', f"⚪ {symbol}: Signal Rejected. Score: {result.get('confluence_score', 0)}/100, Confidence: {result.get('confidence', 'N/A')}. AI Reason: {ai_reason}", symbol=symbol, signal=result.get('signal'), score=result.get('confluence_score'))
+    if st.button("🔄 Fetch High-Impact News", type="primary"):
+        with st.spinner("Fetching economic calendar..."):
+            news = get_high_impact_news(selected_symbols=SYMBOLS, reference_dt=datetime.now(timezone.utc))
+            if news:
+                st.session_state.fetched_news = news
+                sync_news_event_statuses(news, selected_symbols=SYMBOLS)
+                st.success(f"✅ Successfully fetched {len(news)} high-impact events.")
+            else:
+                st.error("❌ Failed to fetch news. Please try again later.")
+    
+    if st.session_state.fetched_news:
+        st.subheader("📋 Upcoming High-Impact Events")
+        st.caption(f"Total events: {len(st.session_state.fetched_news)}")
+        for n in st.session_state.fetched_news:
+            event_id = n.get('event_id') or f"{n.get('event')}|{n.get('currency')}|{n.get('time')}"
+            status_meta = st.session_state.news_event_statuses.get(event_id, {})
+            status = status_meta.get('status', 'waiting')
+            detail = status_meta.get('detail', 'Waiting for AI pre-news analysis.')
+            urgency = "🟠 Within 2 hours" if n.get('within_2h') else "🟡 Upcoming"
+            
+            st.markdown(f"""
+            <div class="news-card">
+                <h4>{urgency} | {n['currency']}: {n['event']}</h4>
+                <p><b>Time:</b> {n['time']} | <b>Impact:</b> {n['impact']} | <b>Minutes Until:</b> {n['minutes_until']}</p>
+                <p><b>Status:</b> {status} - {detail}</p>
+            </div>
+            """, unsafe_allow_html=True)
 
 with tab2:
-    st.header("📜 Premium Signal History")
-    if not st.session_state.signal_history:
-        st.info("📭 No signals generated yet. Run an analysis in the Market Analysis tab.")
+    st.header("🧠 Run AI News Analysis")
+    if not st.session_state.fetched_news:
+        st.warning("⚠️ No news fetched yet. Please go to the 'Fetch News' tab and fetch the calendar first.")
     else:
-        premium_signals = [s for s in st.session_state.signal_history if s.get('confidence') == 'HIGH' and s.get('confluence_score', 0) >= 80]
-        st.metric("Total Premium Signals Logged", len(premium_signals))
-        for i, signal in enumerate(reversed(premium_signals)):
-            with st.expander(f"{'🟢' if signal.get('signal') == 'BUY' else '🔴'} {signal.get('symbol', 'N/A')} - {signal.get('signal')} | Score: {signal.get('confluence_score')}/100 | {signal.get('timestamp', 'N/A')}", expanded=False):
-                col_a, col_b, col_c = st.columns(3)
-                col_a.metric("Entry", signal.get('entry', 'N/A'))
-                col_b.metric("Stop Loss", signal.get('stop_loss', 'N/A'))
-                col_c.metric("Take Profit", signal.get('take_profit', ['N/A'])[0] if signal.get('take_profit') else 'N/A')
-                st.write(f"**Analysis model:** {signal.get('model_used', PYTHON_FALLBACK_MODEL)}")
-                st.write(f"**Tokens Used:** {signal.get('total_tokens', 'N/A')}")
-                st.write(f"**Bias:** {signal.get('bias')} | **Confidence:** {signal.get('confidence')}")
-                st.write(f"**DXY Correlation:** {signal.get('dxy_correlation', 'N/A')}")
-                st.write(f"**Reasoning:** {signal.get('reasoning')}")
-                st.markdown("---")
+        st.info(f"Ready to analyse {len(st.session_state.fetched_news)} events using Groq AI (Llama 3.3 70B).")
+        st.markdown("**Analysis Process:**")
+        st.markdown("- Fetches market context for each symbol (XAUUSD, EURUSD, BTCUSD, US30)")
+        st.markdown("- Applies 5-layer systematic analysis framework")
+        st.markdown("- Integrates FRED historical data + curated news knowledge")
+        st.markdown("- Outputs direction-only signals (no Entry/SL/TP)")
+        st.markdown("- Sends verified signals to Telegram")
+        
+        if st.button("🚀 Analyse News with AI", type="primary"):
+            if not get_secret("GROQ_API_KEY"):
+                st.error("⚠️ Please set your GROQ_API_KEY in Streamlit Secrets.")
+            else:
+                with st.spinner("Fetching market data and running institutional news analysis..."):
+                    all_data = fetch_all_data()
+                    st.session_state.cached_market_data = all_data
+                    
+                    results = run_news_analysis_cycle(st.session_state.fetched_news, all_data, SYMBOLS)
+                    
+                    for eid, event_results in results.items():
+                        event = st.session_state.news_results[eid]['event']
+                        st.subheader(f"📌 {event['event']} ({event['time']})")
+                        
+                        for symbol, analysis in event_results.items():
+                            api_status = analysis.get('api_status', 'UNKNOWN')
+                            model_used = analysis.get('model_used', 'Unknown')
+                            total_tokens = analysis.get('total_tokens', 0)
+                            prompt_tokens = analysis.get('prompt_tokens', 0)
+                            completion_tokens = analysis.get('completion_tokens', 0)
+                            status_color = "green" if api_status in ['SUCCESS', 'SUCCESS_EXTRACTED', 'FALLBACK'] else "red"
+                            
+                            st.markdown(f"**🤖 AI Model:** `{model_used}` | **🔋 Tokens Used:** `{total_tokens}` (Prompt: {prompt_tokens}, Completion: {completion_tokens}) | **📡 Status:** <span style='color:{status_color}; font-weight:bold;'>{api_status}</span>", unsafe_allow_html=True)
+                            
+                            if api_status == 'FALLBACK' and analysis.get('groq_failure'):
+                                st.warning(f"Groq unavailable ({analysis.get('groq_api_status', 'UNKNOWN')}): {analysis['groq_failure']}")
+                                
+                            if api_status not in ['SUCCESS', 'SUCCESS_EXTRACTED', 'FALLBACK']:
+                                with st.expander("🐛 Debug AI Response (Why it failed)"):
+                                    st.code(analysis.get('raw_output', 'No raw output captured.'), language='json')
+                                    st.error(f"Rejection Reason: {analysis.get('rejection_reason', 'Unknown')}")
+                            
+                            sig = analysis.get('signal', 'SKIPPED')
+                            if sig in ('BUY', 'SELL'):
+                                sig_emoji = "🟢" if sig == 'BUY' else "🔴"
+                                css_class = "buy-signal" if sig == 'BUY' else "sell-signal"
+                                st.markdown(f"""
+                                <div class="signal-card {css_class}">
+                                    <h3>{sig_emoji} {symbol} - {sig} | Score: {analysis.get('confluence_score', 0)}/100</h3>
+                                    <p><b>Reasoning:</b> {analysis.get('reasoning', '')}</p>
+                                    <p><b>Historical Pattern:</b> {analysis.get('historical_pattern', '')}</p>
+                                </div>
+                                """, unsafe_allow_html=True)
+                                
+                                st.session_state.signal_history.append({
+                                    'symbol': symbol,
+                                    'signal': sig,
+                                    'event': event['event'],
+                                    'event_time': event['time'],
+                                    'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                                    'reasoning': analysis.get('reasoning', ''),
+                                    'historical_pattern': analysis.get('historical_pattern', ''),
+                                    'confluence_score': analysis.get('confluence_score', 0),
+                                    'confidence': analysis.get('confidence', 'N/A'),
+                                    'model_used': analysis.get('model_used', PYTHON_FALLBACK_MODEL),
+                                    'total_tokens': total_tokens,
+                                    'is_news_signal': True
+                                })
+                                
+                                add_notification('success', f"✅ {symbol}: {sig} signal for {event['event']}. Score: {analysis.get('confluence_score', 0)}/100.", symbol=symbol, signal=sig, score=analysis.get('confluence_score', 0))
+                            elif sig == 'WAIT':
+                                st.info(f"⚪ {symbol}: WAIT - {analysis.get('rejection_reason', analysis.get('reasoning', 'No edge found.'))}")
+                                add_notification('info', f"⚪ {symbol}: WAIT for {event['event']}.", symbol=symbol, signal='WAIT')
+                            else:
+                                st.warning(f"⚪ {symbol}: SKIPPED - {analysis.get('reason', 'rate limit')}")
+                                add_notification('warning', f"⚪ {symbol}: SKIPPED for {event['event']}.", symbol=symbol)
+                        
+                        st.markdown("---")
+                    
+                    st.success("✅ News analysis complete. Signals sent to Telegram.")
 
 with tab3:
+    st.header("📜 News Signal History")
+    if not st.session_state.signal_history:
+        st.info("📭 No news signals generated yet. Run an analysis in the 'Analyse News' tab.")
+    else:
+        news_signals = [s for s in st.session_state.signal_history if s.get('is_news_signal')]
+        st.metric("Total News Signals Logged", len(news_signals))
+        for signal in reversed(news_signals):
+            with st.expander(f"{'🟢' if signal.get('signal') == 'BUY' else '🔴'} {signal.get('symbol')} - {signal.get('signal')} | {signal.get('event')} | {signal.get('timestamp')}"):
+                st.write(f"**Event:** {signal.get('event')}")
+                st.write(f"**Event Time:** {signal.get('event_time')}")
+                st.write(f"**Model:** {signal.get('model_used', PYTHON_FALLBACK_MODEL)}")
+                st.write(f"**Tokens Used:** {signal.get('total_tokens', 'N/A')}")
+                st.write(f"**Confidence:** {signal.get('confidence')} | **Score:** {signal.get('confluence_score')}/100")
+                st.write(f"**Reasoning:** {signal.get('reasoning')}")
+                if signal.get('historical_pattern'):
+                    st.write(f"**Historical Pattern:** {signal.get('historical_pattern')}")
+                st.markdown("---")
+
+with tab4:
     st.header("🔔 Notifications")
     if not st.session_state.notifications:
         st.info("📭 No notifications yet.")
@@ -2826,11 +2315,13 @@ with tab3:
                 else:
                     st.info(f"{header}\n{note.get('message', '')}")
 
-with tab4:
+with tab5:
     st.header("⚙️ System Settings")
-    st.info("Ensure `GEMINI_API_KEY`, `TELEGRAM_BOT_TOKEN`, and `TELEGRAM_CHAT_ID` are set in your Streamlit Secrets.")
-    st.markdown("- **AI Model:** Gemini 2.5 Pro / Flash (Multimodal)")
+    st.info("Ensure `GROQ_API_KEY`, `FRED_API_KEY` (optional), `TELEGRAM_BOT_TOKEN`, and `TELEGRAM_CHAT_ID` are set in your Streamlit Secrets.")
+    st.markdown("- **AI Model:** Llama 3.3 70B Versatile (via Groq)")
     st.markdown("- **Execution:** Manual trigger only (No auto-loop)")
-    st.markdown("- **Features:** SMC, BOS/CHOCH, FVG, Order Blocks, Liquidity Sweeps, DXY Correlation, Regime Filter (ADX), Multi-Strategy Confluence")
+    st.markdown("- **Features:** 5-Layer News Analysis, FRED API integration, Curated News Knowledge, Multi-Timeframe Context, DXY Correlation")
     st.markdown(f"- **Minimum Confluence Score:** {MINIMUM_CONFLUENCE_SCORE}/100")
-    st.markdown("- **Chart Screenshot:** Upload market charts for AI to analyze alongside data")
+    st.markdown("- **News Signals:** Direction-only (no Entry/SL/TP)")
+    st.markdown("- **Telegram Bridge:** Signals sent once per event, ≥2h before release")
+    st.markdown("- **Fallback:** Python rule-based model using USD thesis + HTF alignment when Groq unavailable")
