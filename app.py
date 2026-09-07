@@ -18,7 +18,8 @@ st.markdown("""
 <style>
     .stButton>button { background: linear-gradient(90deg, #059669 0%, #10b981 100%); color: white; border: none; padding: 10px 24px; border-radius: 8px; font-weight: bold; font-size: 16px; width: 100%; }
     .stButton>button:hover { background: linear-gradient(90deg, #047857 0%, #059669 100%); }
-    .news-card { background: #f0fdf4; padding: 20px; border-radius: 12px; border-left: 6px solid #10b981; box-shadow: 0 4px 6px rgba(0,0,0,0.05); margin-bottom: 15px; }
+    .news-card { background: #f0fdf4; color: #123026; padding: 20px; border-radius: 12px; border-left: 6px solid #10b981; box-shadow: 0 4px 6px rgba(0,0,0,0.05); margin-bottom: 15px; }
+    .news-card h4, .news-card p, .news-card b { color: #123026 !important; }
     .signal-card { background: #f8fafc; padding: 20px; border-radius: 12px; border-left: 6px solid #3b82f6; box-shadow: 0 4px 6px rgba(0,0,0,0.05); margin-bottom: 15px; }
     .buy-signal { border-left-color: #10b981; }
     .sell-signal { border-left-color: #ef4444; }
