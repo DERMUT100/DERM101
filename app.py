@@ -41,6 +41,7 @@ def get_secret(name, default=""):
 TELEGRAM_BOT_TOKEN = get_secret("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = get_secret("TELEGRAM_CHAT_ID", "")
 SYMBOLS = ['XAUUSD', 'EURUSD', 'BTCUSD', 'US30']
+NEWS_ANALYSIS_SYMBOLS = ['XAUUSD']
 YFINANCE_MAP = {'XAUUSD': 'GC=F', 'EURUSD': 'EURUSD=X', 'BTCUSD': 'BTC-USD', 'US30': '^DJI', 'DXY': 'DX-Y.NYB'}
 MINIMUM_CONFLUENCE_SCORE = 72
 
@@ -2086,7 +2087,7 @@ def run_news_analysis_cycle(news_events, all_data, symbols):
         
         update_news_event_status(event, 'analyzing', 'AI pre-news impact analysis in progress...')
         results = {}
-        for symbol in symbols:
+        for symbol in NEWS_ANALYSIS_SYMBOLS:
             if st.session_state.last_groq_request_time:
                 delta = (datetime.now() - st.session_state.last_groq_request_time).total_seconds()
                 if delta < GROQ_MIN_REQUEST_INTERVAL:
@@ -2178,9 +2179,9 @@ with tab2:
     if not st.session_state.fetched_news:
         st.warning("⚠️ No news fetched yet. Please go to the 'Fetch News' tab and fetch the calendar first.")
     else:
-        st.info(f"Ready to analyse {len(st.session_state.fetched_news)} events using Groq AI (Llama 3.3 70B).")
+        st.info(f"Ready to analyse {len(st.session_state.fetched_news)} events for XAUUSD using Groq AI.")
         st.markdown("**Analysis Process:**")
-        st.markdown("- Fetches market context for each symbol (XAUUSD, EURUSD, BTCUSD, US30)")
+        st.markdown("- Fetches market context for XAUUSD only")
         st.markdown("- Applies 5-layer systematic analysis framework")
         st.markdown("- Integrates FRED historical data + curated news knowledge")
         st.markdown("- Outputs direction-only signals (no Entry/SL/TP)")
@@ -2207,7 +2208,7 @@ with tab2:
                     all_data = fetch_all_data()
                     st.session_state.cached_market_data = all_data
                     
-                    results = run_news_analysis_cycle([selected_event], all_data, SYMBOLS)
+                    results = run_news_analysis_cycle([selected_event], all_data, NEWS_ANALYSIS_SYMBOLS)
                     
                     for eid, event_results in results.items():
                         event = st.session_state.news_results[eid]['event']
@@ -2258,10 +2259,11 @@ with tab2:
                                     'is_news_signal': True
                                 })
                                 
-                                add_notification('success', f"✅ {symbol}: {sig} signal for {event['event']}. Score: {analysis.get('confluence_score', 0)}/100.", symbol=symbol, signal=sig, score=analysis.get('confluence_score', 0))
+                                add_notification('success', f"✅ {symbol}: {sig} signal for {event['event']}. Score: {analysis.get('confluence_score', 0)}/100. Model: {model_used}. Tokens: {total_tokens}. Reasoning: {analysis.get('reasoning', 'Not provided.')}", symbol=symbol, signal=sig, score=analysis.get('confluence_score', 0))
                             elif sig == 'WAIT':
-                                st.info(f"⚪ {symbol}: WAIT - {analysis.get('rejection_reason', analysis.get('reasoning', 'No edge found.'))}")
-                                add_notification('info', f"⚪ {symbol}: WAIT for {event['event']}.", symbol=symbol, signal='WAIT')
+                                reasoning = analysis.get('reasoning', analysis.get('rejection_reason', 'No edge found.'))
+                                st.info(f"⚪ {symbol}: WAIT - {reasoning}")
+                                add_notification('info', f"⚪ {symbol}: WAIT for {event['event']}. Model: {model_used}. Tokens: {total_tokens}. Reasoning: {reasoning}", symbol=symbol, signal='WAIT')
                             else:
                                 st.warning(f"⚪ {symbol}: SKIPPED - {analysis.get('reason', 'rate limit')}")
                                 add_notification('warning', f"⚪ {symbol}: SKIPPED for {event['event']}.", symbol=symbol)
