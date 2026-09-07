@@ -350,9 +350,7 @@ def filter_relevant_news(events, selected_symbols=None, reference_dt=None):
             continue
         if event_dt < reference - timedelta(hours=6):
             continue
-        if event_dt > reference + timedelta(hours=24):
-            continue
-        if not is_same_day_event(event_dt, reference):
+        if event_dt > reference + timedelta(hours=168):
             continue
         filtered.append(event)
     filtered.sort(key=lambda e: e['event_time_utc'])
@@ -1506,7 +1504,15 @@ def get_high_impact_news(selected_symbols=None, reference_dt=None):
     final = []
     for url in endpoints:
         try:
-            res = requests.get(url, params={"apifooter": "false"}, headers=headers, timeout=20)
+            res = requests.get(url, headers=headers, timeout=20)
+            if res.status_code == 429:
+                retry_after = res.headers.get("Retry-After", "1")
+                try:
+                    retry_delay = min(max(float(retry_after), 0.5), 3.0)
+                except (TypeError, ValueError):
+                    retry_delay = 1.0
+                time.sleep(retry_delay)
+                res = requests.get(url, headers=headers, timeout=20)
             res.raise_for_status()
             text = res.text
             if text.startswith("Title:") or "Markdown Content:" in text:
